@@ -1,11 +1,11 @@
 use std::{env, fs, io, path::{Path, PathBuf}};
 
 use ratatui::{
-    crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind, MouseButton},
+    crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, MouseButton},
     crossterm::execute,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
     DefaultTerminal, Frame,
 };
 use walkdir::WalkDir;
@@ -36,6 +36,11 @@ struct App {
     notes_area: Rect,
     links_rect: Rect,
     back_rect: Rect,
+    vault: PathBuf,
+    switcher_open: bool,
+    query: String,
+    matches: Vec<usize>,
+    switcher_state: ListState,
 }
 
 impl App {
@@ -84,6 +89,11 @@ impl App {
             notes_area: Rect::default(),
             links_rect: Rect::default(),
             back_rect: Rect::default(),
+            vault: vault.to_path_buf(),
+            switcher_open: false,
+            query: String::new(),
+            matches: Vec::new(),
+            switcher_state: ListState::default(),
         };
         app.reset_link_selection();
         app
@@ -107,6 +117,69 @@ impl App {
 
     fn scroll_preview(&mut self, delta: i32) {
         self.preview_scroll = (self.preview_scroll as i32 + delta).max(0) as u16;
+    }
+
+    fn reload(&mut self) {
+        let keep = self.selected_note().map(|n| n.path.clone());
+        let fresh = App::new(&self.vault);
+        self.notes = fresh.notes;
+        let idx = keep
+            .and_then(|p| self.notes.iter().position(|n| n.path == p))
+            .or(if self.notes.is_empty() { None } else { Some(0) });
+        self.list_state.select(idx);
+        self.history.clear();
+        self.forward.clear();
+        self.reset_link_selection();
+    }
+
+    fn open_switcher(&mut self) {
+        self.switcher_open = true;
+        self.query.clear();
+        self.update_matches();
+    }
+
+    fn update_matches(&mut self) {
+        self.matches = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| fuzzy(&self.query, &n.name))
+            .map(|(i, _)| i)
+            .collect();
+        self.switcher_state
+            .select(if self.matches.is_empty() { None } else { Some(0) });
+    }
+
+    fn handle_switcher_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.switcher_open = false,
+            KeyCode::Enter => {
+                let picked = self
+                    .switcher_state
+                    .selected()
+                    .and_then(|i| self.matches.get(i).copied());
+                if let Some(idx) = picked {
+                    if let Some(cur) = self.list_state.selected() {
+                        self.history.push(cur);
+                    }
+                    self.forward.clear();
+                    self.list_state.select(Some(idx));
+                    self.reset_link_selection();
+                }
+                self.switcher_open = false;
+            }
+            KeyCode::Down => self.switcher_state.select_next(),
+            KeyCode::Up => self.switcher_state.select_previous(),
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.update_matches();
+            }
+            KeyCode::Char(c) => {
+                self.query.push(c);
+                self.update_matches();
+            }
+            _ => {}
+        }
     }
 
     fn move_note_selection(&mut self, delta: i32) {
@@ -200,6 +273,10 @@ impl App {
     } 
 
     fn handle_key(&mut self, code: KeyCode) {
+        if self.switcher_open {
+            self.handle_switcher_key(code);
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
@@ -225,6 +302,7 @@ impl App {
             KeyCode::PageUp => self.scroll_preview(-10),
             KeyCode::Backspace | KeyCode::Char('h') => self.go_back(),
             KeyCode::Char('l') => self.go_forward(),
+            KeyCode::Char('r') => self.reload(),
             _ => {}
         }
     }
@@ -240,6 +318,15 @@ fn row_in(area: Rect, x: u16, y: u16) -> Option<usize> {
     } else {
         None
     }
+}
+
+fn fuzzy(query: &str, name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let mut chars = lower.chars();
+    query
+        .to_lowercase()
+        .chars()
+        .all(|qc| chars.any(|c| c == qc))
 }
 
 fn ui(frame: &mut Frame, app: &mut App) {
@@ -327,13 +414,48 @@ fn ui(frame: &mut Frame, app: &mut App) {
         List::new(backs).block(Block::bordered().title(back_title)),
         back_area,
     );
+
+    if app.switcher_open {
+        let area = frame.area();
+        let w = area.width * 6 / 10;
+        let h = area.height.saturating_sub(2).min(14);
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+
+        let [input_area, results_area] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(popup);
+        
+        frame.render_widget(
+            Paragraph::new(format!("{}_", app.query))
+                .block(Block::bordered().title(" Go to note ")),
+            input_area,
+        );
+
+        let items: Vec<ListItem> = app
+            .matches
+            .iter()
+            .map(|&i| ListItem::new(app.notes[i].name.as_str()))
+            .collect();
+        let results = List::new(items)
+            .block(Block::bordered())
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(results, results_area, &mut app.switcher_state);
+    }
+    
 }
 
 fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
         terminal.draw(|f| ui(f, app))?;
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key.code),
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+                    app.open_switcher();
+                } else {
+                    app.handle_key(key.code);
+                }
+            }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollDown => app.scroll_preview(3),
                 MouseEventKind::ScrollUp => app.scroll_preview(-3),
