@@ -10,6 +10,7 @@ use ratatui::{
 };
 use walkdir::WalkDir;
 use regex::Regex;
+use std::process::Command;
 
 #[derive(PartialEq)]
 enum Focus {
@@ -41,6 +42,7 @@ struct App {
     query: String,
     matches: Vec<usize>,
     switcher_state: ListState,
+    edit_requested: bool,
 }
 
 impl App {
@@ -94,6 +96,7 @@ impl App {
             query: String::new(),
             matches: Vec::new(),
             switcher_state: ListState::default(),
+            edit_requested: false,
         };
         app.reset_link_selection();
         app
@@ -130,6 +133,14 @@ impl App {
         self.history.clear();
         self.forward.clear();
         self.reset_link_selection();
+    }
+
+    fn refresh_after_edit(&mut self) {
+        let history = std::mem::take(&mut self.history);
+        let forward = std::mem::take(&mut self.forward);
+        self.reload();
+        self.history = history;
+        self.forward = forward;
     }
 
     fn open_switcher(&mut self) {
@@ -303,6 +314,7 @@ impl App {
             KeyCode::Backspace | KeyCode::Char('h') => self.go_back(),
             KeyCode::Char('l') => self.go_forward(),
             KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('e') => self.edit_requested = true,
             _ => {}
         }
     }
@@ -445,7 +457,34 @@ fn ui(frame: &mut Frame, app: &mut App) {
     
 }
 
-fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
+fn open_editor(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+    let Some(path) = app.selected_note().map(|n| n.path.clone()) else {
+        return Ok (());
+    };
+    let editor = env::var("EDITOR").unwrap_or_else(|_| {
+        if cfg!(windows) { "notepad".to_string() } else { "vi".to_string() }
+    });
+
+    // Hand the terminal back before launching the editor
+    execute!(io::stdout(), DisableMouseCapture)?;
+    ratatui::restore();
+
+    let _ = if cfg!(windows) {
+        Command::new("cmd").arg("/C").arg(&editor).arg(&path).status()
+    } else {
+        let mut parts = editor.split_whitespace();
+        let prog = parts.next().unwrap_or("vi");
+        Command::new(prog).args(parts).arg(&path).status()
+    };
+
+    // Take the terminal back
+    *terminal = ratatui::init();
+    execute!(io::stdout(), EnableMouseCapture)?;
+    app.refresh_after_edit();
+    Ok(())
+}
+
+fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
         terminal.draw(|f| ui(f, app))?;
         match event::read()? {
@@ -466,6 +505,10 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> io::Result<()> {
             },
             _ => {}
         }
+        if app.edit_requested {
+            app.edit_requested = false;
+            open_editor(terminal, app)?;
+        }
     }
     Ok(())
 }
@@ -474,9 +517,9 @@ fn main() -> io::Result<()> {
     let vault = env::args().nth(1).unwrap_or_else(|| ".".to_string());
     let mut app = App::new(Path::new(&vault));
 
-    let terminal = ratatui::init();
+    let mut terminal = ratatui::init();
     execute!(io::stdout(), EnableMouseCapture)?;
-    let result = run(terminal, &mut app);
+    let result = run(&mut terminal, &mut app);
     execute!(io::stdout(), DisableMouseCapture)?;
     ratatui::restore();
     result
