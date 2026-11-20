@@ -342,28 +342,89 @@ fn fuzzy(query: &str, name: &str) -> bool {
         .all(|qc| chars.any(|c| c == qc))
 }
 
-fn highlight_links(text: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("[[") {
-        let Some(end_rel) = rest[start..].find("]]") else { break };
-        let end = start + end_rel + 2;
-        if start > 0 {
-            spans.push(Span::raw(rest[..start].to_string()));
-        }
-        spans.push(Span::styled(
-            rest[start..end].to_string(),
-            Style::new().fg(Color::Yellow),
-        ));
-        rest = &rest[end..];
+fn find_close(chars: &[char], from: usize, marker: &[char]) -> Option<usize> {
+    let n = marker.len();
+    if chars.len() < n {
+        return None;
     }
-    spans.push(Span::raw(rest.to_string()));
-    Line::from(spans)
+    (from..=chars.len() - n).find(|&j| chars[j..j + n] == *marker)
 }
 
-fn render_markdown(content: &str) -> Vec<Line<'static>> {
+fn push_buf(spans: &mut Vec<Span<'static>>, buf: &mut String, base: Style) {
+    if !buf.is_empty() {
+        spans.push(Span::styled(std::mem::take(buf), base));
+    }
+}
+
+fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // [[wikilink]]
+        if c == '[' && chars.get(i + 1) == Some(&'[') {
+            if let Some(end) = find_close(&chars, i + 2, &[']', ']']) {
+                push_buf(&mut spans, &mut buf, base);
+                let s: String = chars[i..end + 2].iter().collect();
+                spans.push(Span::styled(s, base.fg(Color::Yellow)));
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // **bold**
+        if c == '*' && chars.get(i + 1) == Some(&'*') {
+            if let Some(end) = find_close(&chars, i + 2, &['*', '*']) {
+                if end > i + 2 {
+                    push_buf(&mut spans, &mut buf, base);
+                    let s: String = chars[i + 2..end].iter().collect();
+                    spans.push(Span::styled(s, base.add_modifier(Modifier::BOLD)));
+                    i = end + 2;
+                    continue;
+                }
+            }
+        }
+
+        // *italic*
+        if c == '*'
+            && chars
+                .get(i + 1)
+                .map_or(false, |n| !n.is_whitespace() && *n != '*')
+        {
+            if let Some(end) = find_close(&chars, i + 1, &['*']) {
+                push_buf(&mut spans, &mut buf, base);
+                let s: String = chars[i + 1..end].iter().collect();
+                spans.push(Span::styled(s, base.add_modifier(Modifier::ITALIC)));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // `inline code`
+        if c == '`' {
+            if let Some(end) = find_close(&chars, i + 1, &['`']) {
+                push_buf(&mut spans, &mut buf, base);
+                let s: String = chars[i + 1..end].iter().collect();
+                spans.push(Span::styled(s, base.fg(Color::Green)));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        buf.push(c);
+        i += 1;
+    }
+    push_buf(&mut spans, &mut buf, base);
+    spans
+}
+
+fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
     let dim = Style::new().fg(Color::DarkGray);
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let mut in_code = false;
     let mut in_front = false;
 
@@ -383,7 +444,7 @@ fn render_markdown(content: &str) -> Vec<Line<'static>> {
         }
 
         // Fenced code blocks
-        if raw.trim_start().starts_with("'''") {
+        if raw.trim_start().starts_with("```") {
             in_code = !in_code;
             lines.push(Line::styled(raw.to_string(), dim));
             continue;
@@ -394,35 +455,86 @@ fn render_markdown(content: &str) -> Vec<Line<'static>> {
         }
 
         let trimmed = raw.trim_start();
-        let level = trimmed.chars().take_while(|&c| c == '#').count();
+        let indent = &raw[..raw.len() - trimmed.len()];
 
-        if level >= 1 && level <= 6 && trimmed.chars().nth(level) == Some(' ') {
-            // Headings
-            let color = match level {
-                1 => Color::Cyan,
-                2 => Color::Blue,
-                _ => Color::Magenta,
-            };
-            lines.push(Line::styled(
-                raw.to_string(),
-                Style::new().fg(color).add_modifier(Modifier::BOLD),
-            ));
-        } else if trimmed.starts_with(">") {
-            // Blockquotes
-            lines.push(Line::styled(
-                raw.to_string(),
-                dim.add_modifier(Modifier::ITALIC),
-            ));
-        } else {
-            // Bullets and normal text, with [[wikilinks]] highlighted
-            let indent = &raw[..raw.len() - trimmed.len()];
-            let body = if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-                format!("{indent}• {}", &trimmed[2..])
-            } else {
-                raw.to_string()
-            };
-            lines.push(highlight_links(&body));
+        // Horizontal rule (***, ---, ___)
+        let t = trimmed.trim();
+        if t.len() >= 3
+            && (t.chars().all(|c| c == '*')
+                || t.chars().all(|c| c == '-')
+                || t.chars().all(|c| c == '_'))
+        {
+            lines.push(Line::styled("─".repeat(width), dim));
+            continue;
         }
+
+        // Headings
+        let level = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&level) && trimmed.chars().nth(level) == Some(' ') {
+            let text = trimmed[level + 1..].trim().to_string();
+            match level {
+                1 => {
+                    let style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+                    lines.push(Line::styled(text.to_uppercase(), style));
+                    lines.push(Line::styled("═".repeat(width), Style::new().fg(Color::Cyan)));
+                }
+                2 => {
+                    let style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
+                    let underline = "─".repeat(text.chars().count());
+                    lines.push(Line::styled(text, style));
+                    lines.push(Line::styled(underline, Style::new().fg(Color::Blue)));
+                }
+                3 => {
+                    let style = Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+                    lines.push(Line::styled(format!("▌ {text}"), style));
+                }
+                _ => {
+                    let style = Style::new().fg(Color::Magenta).add_modifier(Modifier::ITALIC);
+                    lines.push(Line::styled(text, style));
+                }
+            }
+            continue;
+        }
+
+        // Blockquotes (nested with > >)
+        if trimmed.starts_with('>') {
+            let mut depth = 0;
+            let mut rest = trimmed;
+            while let Some(r) = rest.strip_prefix('>') {
+                depth += 1;
+                rest = r.trim_start();
+            }
+            let qstyle = dim.add_modifier(Modifier::ITALIC);
+            let mut spans = vec![Span::styled("| ".repeat(depth), dim)];
+            spans.extend(inline_spans(rest, qstyle));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        // Bullet lists (-, *, +), nested by indentation
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            let depth = indent.len() / 2;
+            let bullet = if depth % 2 == 0 { "•" } else { "◦" };
+            let mut spans = vec![Span::raw(format!("{indent}{bullet}"))];
+            spans.extend(inline_spans(&trimmed[2..], Style::new()));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        // Ordered lists (1. 2. 3.)
+        let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && trimmed[digits..].starts_with(". ") {
+            let mut spans = vec![Span::styled(
+                format!("{indent}{}", &trimmed[..digits + 2]),
+                Style::new().fg(Color::Cyan),
+            )];
+            spans.extend(inline_spans(&trimmed[digits + 2..], Style::new()));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        // Normal text
+        lines.push(Line::from(inline_spans(raw, Style::new())));
     }
     lines
 }
@@ -464,9 +576,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
         Some(n) => (format!(" {} ", n.name), n.content.clone()),
         None => (" Preview ".to_string(), "No notes found.".to_string()),
     };
-    let max_scroll = content.lines().count().saturating_sub(1) as u16;
-    app.preview_scroll = app.preview_scroll.min(max_scroll) as u16;
-    let preview = Paragraph::new(render_markdown(&content))
+    let rendered = render_markdown(&content, preview_area.width.saturating_sub(2) as usize);
+    let max_scroll = rendered.len().saturating_sub(1) as u16;
+    app.preview_scroll = app.preview_scroll.min(max_scroll);
+    let preview = Paragraph::new(rendered)
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.preview_scroll, 0));
