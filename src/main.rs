@@ -1,7 +1,7 @@
 use std::{env, fs, io, path::{Path, PathBuf}};
 
 use ratatui::{
-    crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, MouseButton},
+    crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind, MouseButton},
     crossterm::execute,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -11,6 +11,7 @@ use ratatui::{
 };
 use walkdir::WalkDir;
 use regex::Regex;
+use tui_textarea::TextArea;
 use std::process::Command;
 
 #[derive(PartialEq)]
@@ -46,6 +47,9 @@ struct App {
     edit_requested: bool,
     prompt_open: bool,
     prompt_text: String,
+    editor: Option<TextArea<'static>>,
+    editor_dirty: bool,
+    discard_warned: bool,
 }
 
 impl App {
@@ -102,6 +106,9 @@ impl App {
             edit_requested: false,
             prompt_open: false,
             prompt_text: String::new(),
+            editor: None,
+            editor_dirty: false,
+            discard_warned: false,
         };
         app.reset_link_selection();
         app
@@ -125,6 +132,9 @@ impl App {
 
     fn scroll_preview(&mut self, delta: i32) {
         self.preview_scroll = (self.preview_scroll as i32 + delta).max(0) as u16;
+        if self.editor.is_some() {
+            return;
+        }
     }
 
     fn reload(&mut self) {
@@ -169,13 +179,62 @@ impl App {
             self.reset_link_selection();
         }
         if is_new {
-            self.edit_requested = true;
+            self.start_editing();
         }
     }
 
     fn open_daily(&mut self) {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         self.create_note(&today);
+    }
+
+    fn start_editing(&mut self) {
+        let Some(n) = self.selected_note() else { return };
+        let mut lines: Vec<String> = n.content.lines().map(|l| l.to_string()).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.editor = Some(TextArea::new(lines));
+        self.editor_dirty = false;
+        self.discard_warned = false;
+    }
+
+    fn save_editor(&mut self) {
+        let Some(ta) = &self.editor else { return };
+        let text = format!("{}\n", ta.lines().join("\n"));
+        let Some(idx) = self.list_state.selected() else { return };
+        let path = self.notes[idx].path.clone();
+        if fs::write(&path, &text).is_ok() {
+            self.notes[idx].links = parse_links(&text);
+            self.notes[idx].content =text;
+            self.editor_dirty = false;
+            self.discard_warned = false;
+        }
+    }
+
+    fn handle_editor_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('s') if ctrl => self.save_editor(),
+            KeyCode::Esc => {
+                if self.editor_dirty && !self.discard_warned {
+                    self.discard_warned = true;
+                } else {
+                    self.editor = None;
+                    self.editor_dirty = false;
+                    self.discard_warned = false;
+                    self.reset_link_selection();
+                }
+            }
+            _ => {
+                if let Some(ta) = self.editor.as_mut() {
+                    if ta.input(key) {
+                        self.editor_dirty = true;
+                        self.discard_warned = false;
+                    }
+                }
+            }
+        }
     }
 
     fn handle_prompt_key(&mut self, code: KeyCode) {
@@ -321,6 +380,9 @@ impl App {
                 }
             }
         }
+        if self.editor.is_some() {
+            return;
+        }
     }
 
     fn backlinks(&self) -> Vec<&Note> {
@@ -369,7 +431,8 @@ impl App {
             KeyCode::Backspace | KeyCode::Char('h') => self.go_back(),
             KeyCode::Char('l') => self.go_forward(),
             KeyCode::Char('r') => self.reload(),
-            KeyCode::Char('e') => self.edit_requested = true,
+            KeyCode::Char('e') => self.start_editing(),
+            KeyCode::Char('E') => self.edit_requested = true,
             KeyCode::Char('n') => {
                 self.prompt_text.clear();
                 self.prompt_open = true;
@@ -598,6 +661,13 @@ fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+fn parse_links(content: &str) -> Vec<String> {
+    let re = Regex::new(r"\[\[([^\]|#]+)(?:[#|]^\]]*)?\]\]").unwrap();
+    re.captures_iter(content)
+        .map(|c| c[1].trim().to_lowercase())
+        .collect()
+}
+
 fn ui(frame: &mut Frame, app: &mut App) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -631,18 +701,40 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, left, &mut app.list_state);
 
-    let (title, content) = match app.selected_note() {
-        Some(n) => (format!(" {} ", n.name), n.content.clone()),
-        None => (" Preview ".to_string(), "No notes found.".to_string()),
-    };
-    let rendered = render_markdown(&content, preview_area.width.saturating_sub(2) as usize);
-    let max_scroll = rendered.len().saturating_sub(1) as u16;
-    app.preview_scroll = app.preview_scroll.min(max_scroll);
-    let preview = Paragraph::new(rendered)
-        .block(Block::bordered().title(title))
-        .wrap(Wrap { trim: false })
-        .scroll((app.preview_scroll, 0));
-    frame.render_widget(preview, preview_area);
+    if app.editor.is_some() {
+        let name = app
+            .selected_note()
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        let title = if app.discard_warned {
+            " Unsaved changes! Esc = discard, Ctrl+S = save".to_string()
+        } else if app.editor_dirty {
+            format!(" Editing {name} [modified] - Ctrl+S save, Esc exit")
+        } else {
+            format!(" Editing {name} - Ctrl+S save, Esc exit")
+        };
+        if let Some(ta) = app.editor.as_mut() {
+            ta.set_block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(Style::new().fg(Color::Yellow)),
+            );
+            frame.render_widget(&*ta, preview_area);
+        }
+    } else {
+        let (title, content) = match app.selected_note() {
+            Some(n) => (format!(" {} ", n.name), n.content.clone()),
+            None => (" Preview ".to_string(), "No notes found.".to_string()),
+        };
+        let rendered =render_markdown(&content, preview_area.width.saturating_sub(2) as usize);
+        let max_scroll = rendered.len().saturating_sub(1) as u16;
+        app.preview_scroll = app.preview_scroll.min(max_scroll);
+        let preview = Paragraph::new(rendered)
+            .block(Block::bordered().title(title))
+            .wrap(Wrap { trim: false })
+            .scroll((app.preview_scroll, 0));
+        frame.render_widget(preview, preview_area);
+    }
 
     let outgoing: Vec<ListItem> = app
         .selected_note()
@@ -759,7 +851,9 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         terminal.draw(|f| ui(f, app))?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+                if app.editor.is_some() {
+                    app.handle_editor_key(key);
+                } else if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
                     app.open_switcher();
                 } else {
                     app.handle_key(key.code);
