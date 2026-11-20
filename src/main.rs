@@ -44,6 +44,8 @@ struct App {
     matches: Vec<usize>,
     switcher_state: ListState,
     edit_requested: bool,
+    prompt_open: bool,
+    prompt_text: String,
 }
 
 impl App {
@@ -98,6 +100,8 @@ impl App {
             matches: Vec::new(),
             switcher_state: ListState::default(),
             edit_requested: false,
+            prompt_open: false,
+            prompt_text: String::new(),
         };
         app.reset_link_selection();
         app
@@ -142,6 +146,52 @@ impl App {
         self.reload();
         self.history = history;
         self.forward = forward;
+    }
+
+    fn create_note(&mut self, name: &str) {
+        let clean: String = name
+            .trim()
+            .chars()
+            .filter(|c| !"\\/:*?\"<>|".contains(*c))
+            .collect();
+        if clean.is_empty() {
+            return;
+        }
+        let path = self.vault.join(format!("{clean}.md"));
+        let is_new = !path.exists();
+        if is_new {
+            let _ = fs::write(&path, format!("# {clean}\n\n"));
+        }
+        self.refresh_after_edit();
+        let lower = clean.to_lowercase();
+        if let Some(idx) = self.notes.iter().position(|n| n.name.to_lowercase() == lower) {
+            self.list_state.select(Some(idx));
+            self.reset_link_selection();
+        }
+        if is_new {
+            self.edit_requested = true;
+        }
+    }
+
+    fn open_daily(&mut self) {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.create_note(&today);
+    }
+
+    fn handle_prompt_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.prompt_open = false,
+            KeyCode::Enter => {
+                let name = std::mem::take(&mut self.prompt_text);
+                self.prompt_open = false;
+                self.create_note(&name);
+            }
+            KeyCode::Backspace => {
+                self.prompt_text.pop();
+            }
+            KeyCode::Char(c) => self.prompt_text.push(c),
+            _ => {}
+        }
     }
 
     fn open_switcher(&mut self) {
@@ -289,6 +339,10 @@ impl App {
             self.handle_switcher_key(code);
             return;
         }
+        if self.prompt_open {
+            self.handle_prompt_key(code);
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
@@ -316,6 +370,11 @@ impl App {
             KeyCode::Char('l') => self.go_forward(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('e') => self.edit_requested = true,
+            KeyCode::Char('n') => {
+                self.prompt_text.clear();
+                self.prompt_open = true;
+            }
+            KeyCode::Char('d') => self.open_daily(),
             _ => {}
         }
     }
@@ -652,6 +711,18 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(results, results_area, &mut app.switcher_state);
+    }
+
+    if app.prompt_open {
+        let area = frame.area();
+        let w = area.width * 6 / 10;
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, 3);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(format!("{}_", app.prompt_text))
+                .block(Block::bordered().title(" New note name (Enter = create, Esc = cancel ")),
+            popup,
+        );
     }
     
 }
