@@ -5,6 +5,7 @@ use ratatui::{
     crossterm::execute,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
     DefaultTerminal, Frame,
 };
@@ -341,6 +342,91 @@ fn fuzzy(query: &str, name: &str) -> bool {
         .all(|qc| chars.any(|c| c == qc))
 }
 
+fn highlight_links(text: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let Some(end_rel) = rest[start..].find("]]") else { break };
+        let end = start + end_rel + 2;
+        if start > 0 {
+            spans.push(Span::raw(rest[..start].to_string()));
+        }
+        spans.push(Span::styled(
+            rest[start..end].to_string(),
+            Style::new().fg(Color::Yellow),
+        ));
+        rest = &rest[end..];
+    }
+    spans.push(Span::raw(rest.to_string()));
+    Line::from(spans)
+}
+
+fn render_markdown(content: &str) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut lines = Vec::new();
+    let mut in_code = false;
+    let mut in_front = false;
+
+    for (i, raw) in content.lines().enumerate() {
+        // YAML frontmatter at the top of the file
+        if i == 0 && raw.trim() == "---" {
+            in_front = true;
+            lines.push(Line::styled(raw.to_string(), dim));
+            continue;
+        }
+        if in_front {
+            lines.push(Line::styled(raw.to_string(), dim));
+            if raw.trim() == "---" {
+                in_front = false;
+            }
+            continue;
+        }
+
+        // Fenced code blocks
+        if raw.trim_start().starts_with("'''") {
+            in_code = !in_code;
+            lines.push(Line::styled(raw.to_string(), dim));
+            continue;
+        }
+        if in_code {
+            lines.push(Line::styled(raw.to_string(), Style::new().fg(Color::Green)));
+            continue;
+        }
+
+        let trimmed = raw.trim_start();
+        let level = trimmed.chars().take_while(|&c| c == '#').count();
+
+        if level >= 1 && level <= 6 && trimmed.chars().nth(level) == Some(' ') {
+            // Headings
+            let color = match level {
+                1 => Color::Cyan,
+                2 => Color::Blue,
+                _ => Color::Magenta,
+            };
+            lines.push(Line::styled(
+                raw.to_string(),
+                Style::new().fg(color).add_modifier(Modifier::BOLD),
+            ));
+        } else if trimmed.starts_with(">") {
+            // Blockquotes
+            lines.push(Line::styled(
+                raw.to_string(),
+                dim.add_modifier(Modifier::ITALIC),
+            ));
+        } else {
+            // Bullets and normal text, with [[wikilinks]] highlighted
+            let indent = &raw[..raw.len() - trimmed.len()];
+            let body = if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+                format!("{indent}• {}", &trimmed[2..])
+            } else {
+                raw.to_string()
+            };
+            lines.push(highlight_links(&body));
+        }
+    }
+    lines
+}
+
 fn ui(frame: &mut Frame, app: &mut App) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -380,7 +466,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
     };
     let max_scroll = content.lines().count().saturating_sub(1) as u16;
     app.preview_scroll = app.preview_scroll.min(max_scroll) as u16;
-    let preview = Paragraph::new(content)
+    let preview = Paragraph::new(render_markdown(&content))
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false })
         .scroll((app.preview_scroll, 0));
