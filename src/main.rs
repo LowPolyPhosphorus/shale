@@ -11,6 +11,8 @@ use ratatui::{
 };
 use walkdir::WalkDir;
 use regex::Regex;
+use ratatui::symbols::Marker;
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use tui_textarea::TextArea;
 use std::process::Command;
 
@@ -54,6 +56,15 @@ struct App {
     search_query: String,
     search_results: Vec<(usize, String)>,
     search_state: ListState,
+    tag_open: bool,
+    tag_list: Vec<(String, Vec<usize>)>,
+    tag_stage: Option<usize>,
+    tag_state: ListState,
+    graph_open: bool,
+    graph_center: usize,
+    graph_adj: Vec<Vec<usize>>,
+    graph_depth: u8,
+    graph_sel: usize,
 }
 
 impl App {
@@ -117,6 +128,15 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_state: ListState::default(),
+            tag_open: false,
+            tag_list: Vec::new(),
+            tag_stage: None,
+            tag_state: ListState::default(),
+            graph_open: false,
+            graph_center: 0,
+            graph_adj: Vec::new(),
+            graph_depth: 2,
+            graph_sel: 0,
         };
         app.reset_link_selection();
         app
@@ -140,7 +160,7 @@ impl App {
 
     fn scroll_preview(&mut self, delta: i32) {
         self.preview_scroll = (self.preview_scroll as i32 + delta).max(0) as u16;
-        if self.editor.is_some() {
+        if self.editor.is_some() || self.graph_open {
             return;
         }
     }
@@ -306,7 +326,165 @@ impl App {
         }
     }
 
+    fn open_tags(&mut self) {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, n) in self.notes.iter().enumerate() {
+            for t in parse_tags(&n.content) {
+                map.entry(t).or_default().push(i);
+            }
+        }
+        self.tag_list = map.into_iter().collect();
+        self.tag_stage = None;
+        self.tag_open = true;
+        self.tag_state
+            .select(if self.tag_list.is_empty() { None } else { Some(0) });
+    }
+
+    fn handle_tag_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                if self.tag_stage.is_some() {
+                    let t = self.tag_stage.take();
+                    self.tag_state.select(t);
+                } else {
+                    self.tag_open = false;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.tag_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.tag_state.select_previous(),
+            KeyCode::Enter => {
+                let Some(sel) = self.tag_state.selected() else { return };
+                match self.tag_stage {
+                    None => {
+                        self.tag_stage = Some(sel);
+                        self.tag_state.select(Some(0));
+                    }
+                    Some(t) => {
+                        let idx = self
+                            .tag_list
+                            .get(t)
+                            .and_then(|(_, v)| v.get(sel))
+                            .copied();
+                        if let Some(idx) = idx {
+                            if let Some(cur) = self.list_state.selected() {
+                                self.history.push(cur);
+                            }
+                            self.forward.clear();
+                            self.list_state.select(Some(idx));
+                            self.reset_link_selection();
+                        }
+                        self.tag_open = false;
+                        self.tag_stage = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn build_adjency(&self) -> Vec<Vec<usize>> {
+        use std::collections::HashMap;
+        let mut by_name: HashMap<String, usize> = HashMap::new();
+        for (i, n) in self.notes.iter().enumerate() {
+            by_name.insert(n.name.to_lowercase(), i);
+        }
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); self.notes.len()];
+        for (i, n) in self.notes.iter().enumerate() {
+            for l in &n.links {
+                if let Some(&j) = by_name.get(l) {
+                    if j != i {
+                        adj[i].push(j);
+                        adj[j].push(i);
+                    }
+                }
+            }
+        }
+        for v in adj.iter_mut() {
+            v.sort();
+            v.dedup();
+        }
+        adj
+    }
+
+    fn open_graph(&mut self) {
+        let Some(sel) = self.list_state.selected() else { return };
+        self.graph_adj = self.build_adjency();
+        self.graph_center = sel;
+        self.graph_depth = 2;
+        self.graph_sel = 0;
+        self.graph_open = true;
+    }
+
+    fn graph_visible(&self) -> Vec<(usize, u8)> {
+        let c = self.graph_center;
+        let mut out = vec![(c, 0u8)];
+        let Some(first) = self.graph_adj.get(c) else { return out };
+        let ring1: Vec<usize> = first.iter().copied().take(40).collect();
+        for &n in &ring1 {
+            out.push((n, 1));
+        }
+        if self.graph_depth >= 2 {
+            for &n in &ring1 {
+                for &m in &self.graph_adj[n] {
+                    if out.len() < 70 && !out.iter().any(|&(x, _)| x == m) {
+                        out.push((m, 2));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn handle_graph_key(&mut self, code: KeyCode) {
+        let count = self.graph_visible().len().max(1);
+        match code {
+            KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => self.graph_open = false,
+            KeyCode::Right
+            | KeyCode::Down
+            | KeyCode::Tab
+            | KeyCode::Char('j')
+            | KeyCode::Char('l') => {
+                self.graph_sel = (self.graph_sel + 1) % count;
+            }
+            KeyCode::Left
+            | KeyCode::Up
+            | KeyCode::Char('k')
+            | KeyCode::Char('h') => {
+                self.graph_sel = (self.graph_sel + count - 1) % count;
+            }
+            KeyCode::Char('1') => {
+                self.graph_depth = 1;
+                self.graph_sel = 0;
+            }
+            KeyCode::Char('2') => {
+                self.graph_depth = 2;
+                self.graph_sel = 0;
+            }
+            KeyCode::Enter => {
+                let target = self.graph_visible().get(self.graph_sel).map(|&(i, _)| i);
+                if let Some(idx) = target {
+                    if self.list_state.selected() != Some(idx) {
+                        if let Some(cur) = self.list_state.selected() {
+                            self.history.push(cur);
+                        }
+                        self.forward.clear();
+                        self.list_state.select(Some(idx));
+                        self.reset_link_selection();
+                    }
+                    self.graph_center = idx;
+                    self.graph_sel = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_prompt_key(&mut self, code: KeyCode) {
+        if self.graph_open {
+            self.handle_graph_key(code);
+            return;
+        }
         match code {
             KeyCode::Esc => self.prompt_open = false,
             KeyCode::Enter => {
@@ -478,6 +656,10 @@ impl App {
             self.handle_search_key(code);
             return;
         }
+        if self.tag_open {
+            self.handle_tag_key(code);
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
@@ -512,6 +694,8 @@ impl App {
             }
             KeyCode::Char('d') => self.open_daily(),
             KeyCode::Char('/') => self.open_search(),
+            KeyCode::Char('t') => self.open_tags(),
+            KeyCode::Char('g') => self.open_graph(),
             _ => {}
         }
     }
@@ -742,6 +926,41 @@ fn parse_links(content: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_tags(content: &str) -> Vec<String> {
+    let re = Regex::new(r"(?m)(?:^|\s)#([A-Za-z][\w/-]*)").unwrap();
+    let mut tags: Vec<String> = re
+        .captures_iter(content)
+        .map(|c| c[1].to_lowercase())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn graph_layout(visible: &[(usize, u8)], rx: f64, ry: f64, r1: f64) -> Vec<(f64, f64)> {
+    let n1 = visible.iter().filter(|(_, r)| *r == 1).count();
+    let n2 = visible.iter().filter(|(_, r)| *r == 2).count();
+    let (mut i1, mut i2) = (0usize, 0usize);
+    visible
+        .iter()
+        .map(|&(_, ring)| match ring {
+            0 => (0.0, 0.0),
+            1 => {
+                let a = std::f64::consts::TAU * i1 as f64 / n1 as f64
+                    - std::f64::consts::FRAC_PI_2;
+                i1 += 1;
+                (a.cos() * rx * r1, a.sin() * ry * r1)
+            }
+            _ => {
+                let a = std::f64::consts::TAU * i2 as f64 / n2 as f64
+                    - std::f64::consts::FRAC_PI_2;
+                i2 += 1;
+                (a.cos() * rx, a.sin() * ry)
+            }
+        })
+        .collect()
+}
+
 fn ui(frame: &mut Frame, app: &mut App) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -926,6 +1145,118 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(results, results_area, &mut app.search_state);
+    }
+
+    if app.tag_open {
+        let area = frame.area();
+        let w = area.width * 6 / 10;
+        let h = area.height.saturating_sub(4).min(20);
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+
+        let (title, items): (String, Vec<ListItem>) = match app.tag_stage {
+            None => (
+                format!(" Tags ({}) - Enter = view notes, Esc = close ", app.tag_list.len()),
+                app.tag_list
+                    .iter()
+                    .map(|(t, v)| ListItem::new(format!("#{t} ({})", v.len())))
+                    .collect(),
+            ),
+            Some(ti) => {
+                let (t, v) = &app.tag_list[ti];
+                (
+                    format!(" #{t} - Enter = open, Esc = back "),
+                    v.iter()
+                        .map(|&i| ListItem::new(app.notes[i].name.clone()))
+                        .collect(),
+                )
+            }
+        };
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.tag_state);
+    }
+
+    if app.graph_open {
+        let area = frame.area();
+        let visible = app.graph_visible();
+        let sel = app.graph_sel.min(visible.len().saturating_sub(1));
+
+        // Canvas units are braille dots: 2 per cell wide, 4 per cell tall
+        let wd = area.width.saturating_sub(2) as f64 * 2.0;
+        let hd = area.height.saturating_sub(2) as f64 * 4.0;
+        let rx = wd / 2.0 * 0.72;
+        let ry = hd / 2.0 * 0.80;
+        let r1 = if app.graph_depth >= 2 { 0.5 } else { 0.85 };
+        let pos = graph_layout(&visible, rx, ry, r1);
+
+        let mut edges: Vec<(f64, f64, f64, f64)> = Vec::new();
+        for (k, &(note_idx, ring)) in visible.iter().enumerate() {
+            match ring {
+                1 => edges.push((pos[0].0, pos[0].1, pos[k].0, pos[k].1)),
+                2 => {
+                    let parent = visible
+                        .iter()
+                        .position(|&(p, r)| r == 1 && app.graph_adj[p].contains(&note_idx));
+                    if let Some(p) = parent {
+                        edges.push((pos[p].0, pos[p].1, pos[k].0, pos[k].1));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let labels: Vec<(f64, f64, String, Style)> = visible
+            .iter()
+            .enumerate()
+            .map(|(k, &(note_idx, ring))| {
+                let name: String = app.notes[note_idx].name.chars().take(18).collect();
+                let text = format!("● {name}");
+                let mut style = match ring {
+                    0 => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    1 => Style::new().fg(Color::White),
+                    _ => Style::new().fg(Color::Gray),
+                };
+                if k == sel {
+                    style = Style::new()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD);
+                }
+                // Center the label on the node
+                let x = pos[k].0 - text.chars().count() as f64;
+                (x, pos[k].1, text, style)
+            })
+            .collect();
+
+        let title = format!(
+            " Graph: {} ({} shown) - j/k move, Enter recenter, 1/2 depth, Esc close ",
+            app.notes[app.graph_center].name,
+            visible.len()
+        );
+        let canvas = Canvas::default()
+            .block(Block::bordered().title(title))
+            .marker(Marker::Braille)
+            .x_bounds([-wd / 2.0, wd / 2.0])
+            .y_bounds([-hd / 2.0, hd / 2.0])
+            .paint(|ctx| {
+                for &(x1, y1, x2, y2) in &edges {
+                    ctx.draw(&CanvasLine {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color: Color::DarkGray,
+                    });
+                }
+                for (x, y, text, style) in &labels {
+                    ctx.print(*x, *y, Line::styled(text.clone(), *style));
+                }
+            });
+        frame.render_widget(Clear, area);
+        frame.render_widget(canvas, area);
     }
 }
 
