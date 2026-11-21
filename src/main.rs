@@ -50,6 +50,10 @@ struct App {
     editor: Option<TextArea<'static>>,
     editor_dirty: bool,
     discard_warned: bool,
+    search_open: bool,
+    search_query: String,
+    search_results: Vec<(usize, String)>,
+    search_state: ListState,
 }
 
 impl App {
@@ -109,6 +113,10 @@ impl App {
             editor: None,
             editor_dirty: false,
             discard_warned: false,
+            search_open: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_state: ListState::default(),
         };
         app.reset_link_selection();
         app
@@ -234,6 +242,67 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    fn open_search(&mut self) {
+        self.search_open = true;
+        self.search_query.clear();
+        self.update_matches();
+    }
+
+    fn update_search(&mut self) {
+        self.search_results.clear();
+        let q = self.search_query.to_lowercase();
+        if q.chars().count() >= 2 {
+            'outer: for (i, n) in self.notes.iter().enumerate() {
+                for line in n.content.lines() {
+                        if line.to_lowercase().contains(&q ) {
+                        self.search_results.push((i, line.trim().to_string()));
+                        if self.search_results.len() >= 200 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        self.search_state.select(if self.search_results.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+    }
+
+    fn handle_search_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.search_open = false,
+            KeyCode::Enter => {
+                let picked = self 
+                    .search_state
+                    .selected()
+                    .and_then(|i| self.search_results.get(i))
+                    .map(|(idx, _)| *idx);
+                if let Some(idx) = picked {
+                    if let Some(cur) = self.list_state.selected() {
+                        self.history.push(cur);
+                    }
+                    self.forward.clear();
+                    self.list_state.select(Some(idx));
+                    self.reset_link_selection();
+                }
+                self.search_open = false;
+            }
+            KeyCode::Down => self.search_state.select_next(),
+            KeyCode::Up => self.search_state.select_previous(),
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.update_search();
+            }
+            KeyCode::Char(c) => {
+                self.search_query.push(c);
+                self.update_search();
+            }
+            _ => {}
         }
     }
 
@@ -405,6 +474,10 @@ impl App {
             self.handle_prompt_key(code);
             return;
         }
+        if self.search_open {
+            self.handle_search_key(code);
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
@@ -438,6 +511,7 @@ impl App {
                 self.prompt_open = true;
             }
             KeyCode::Char('d') => self.open_daily(),
+            KeyCode::Char('/') => self.open_search(),
             _ => {}
         }
     }
@@ -817,6 +891,42 @@ fn ui(frame: &mut Frame, app: &mut App) {
         );
     }
     
+    if app.search_open {
+        let area = frame.area();
+        let w = area.width * 8 / 10;
+        let h = area.height.saturating_sub(4);
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+
+        let [input_area, results_area] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(popup);
+        
+        frame.render_widget(
+            Paragraph::new(format!("{}_", app.search_query))
+                .block(Block::bordered().title(" Search all notes ")),
+            input_area,
+        );
+
+        let items: Vec<ListItem> = app
+            .search_results
+            .iter()
+            .map(|(i, snippet)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{}: ", app.notes[*i].name),
+                        Style::new().fg(Color::Cyan),
+                    ),
+                    Span::raw(snippet.clone()),
+                ]))
+            })
+            .collect();
+        let title = format!(" {} matches ", app.search_results.len());
+        let results = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(results, results_area, &mut app.search_state);
+    }
 }
 
 fn open_editor(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
