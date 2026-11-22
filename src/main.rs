@@ -660,6 +660,10 @@ impl App {
             self.handle_tag_key(code);
             return;
         }
+        if self.graph_open {
+            self.handle_graph_key(code);
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
