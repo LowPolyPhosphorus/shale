@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 use regex::Regex;
 use ratatui::symbols::Marker;
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
-use tui_textarea::TextArea;
+use tui_textarea::{CursorMove, TextArea};
 use std::process::Command;
 
 #[derive(PartialEq)]
@@ -60,6 +60,10 @@ struct App {
     graph_depth: u8,
     graph_sel: usize,
     help_open: bool,
+    ac_open: bool,
+    ac_query: String,
+    ac_matches: Vec<usize>,
+    ac_state: ListState,
 }
 
 impl App {
@@ -133,6 +137,10 @@ impl App {
             graph_depth: 2,
             graph_sel: 0,
             help_open: false,
+            ac_open: false,
+            ac_query: String::new(),
+            ac_matches: Vec::new(),
+            ac_state: ListState::default(),
         };
         app.reset_link_selection();
         app
@@ -238,6 +246,29 @@ impl App {
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if self.ac_open {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ac_open = false;
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.accept_autocomplete();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.ac_state.select_next();
+                    return;
+                }
+                KeyCode::Up => {
+                    self.ac_state.select_previous();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('s') if ctrl => self.save_editor(),
             KeyCode::Esc => {
@@ -259,6 +290,64 @@ impl App {
                 }
             }
         }
+
+        self.update_autocomplete();
+    }
+
+    fn update_autocomplete(&mut self) {
+        let q = self.editor.as_ref().and_then(|ta| ac_query(ta));
+        match q {
+            Some(q) => {
+                let ql = q.to_lowercase();
+                let mut m: Vec<usize> = self
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| fuzzy(&q, &n.name))
+                    .map(|(i, _)| i)
+                    .collect();
+                m.sort_by_key(|&i| {
+                    let n = self.notes[i].name.to_lowercase();
+                    (!n.starts_with(&ql), n.len())
+                });
+                m.truncate(8);
+                self.ac_query = q;
+                self.ac_open = !m.is_empty();
+                self.ac_state.select(if m.is_empty() { None } else { Some(0) });
+                self.ac_matches = m;
+            }
+            None => self.ac_open = false,
+        }
+    }
+
+    fn accept_autocomplete(&mut self) {
+        let picked = self
+            .ac_state
+            .selected()
+            .and_then(|i| self.ac_matches.get(i).copied());
+        let Some(idx) = picked else {
+            self.ac_open = false;
+            return;
+        };
+        let name = self.notes[idx].name.clone();
+        let qlen = self.ac_query.chars().count();
+        if let Some(ta) = self.editor.as_mut() {
+            for _ in 0..qlen {
+                ta.delete_char();
+            }
+            ta.insert_str(&name);
+            let (row, col) = ta.cursor();
+            let rest: String = ta.lines()[row].chars().skip(col).take(2).collect();
+            if rest == "]]" {
+                ta.move_cursor(CursorMove::Forward);
+                ta.move_cursor(CursorMove::Forward);
+            } else {
+                ta.insert_str("]]");
+            }
+            self.editor_dirty = true;
+            self.discard_warned = false;
+        }
+        self.ac_open = false;
     }
 
     fn open_search(&mut self) {
@@ -966,6 +1055,18 @@ fn graph_layout(visible: &[(usize, u8)], rx: f64, ry: f64, r1: f64) -> Vec<(f64,
         .collect()
 }
 
+fn ac_query(ta: &TextArea) -> Option<String> {
+    let(row, col) = ta.cursor();
+    let line = ta.lines().get(row)?;
+    let before: String = line.chars().take(col).collect();
+    let pos = before.rfind("[[")?;
+    let after = &before[pos + 2..];
+    if after.contains(|c| c == ']' || c == '|' || c == '#') {
+        return None;
+    }
+    Some(after.to_string())
+}
+
 fn ui(frame: &mut Frame, app: &mut App) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -1304,6 +1405,29 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Paragraph::new(lines).block(Block::bordered().title(" Help ")),
             popup,
         );
+    }
+
+    if app.ac_open {
+        let n = app.ac_matches.len() as u16;
+        let h = (n + 2).min(preview_area.height);
+        let w = preview_area.width.min(36);
+        let popup = Rect::new(
+            preview_area.x + preview_area.width.min(2),
+            preview_area.y + preview_area.height.saturating_sub(h + 1),
+            w,
+            h,
+        );
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .ac_matches
+            .iter()
+            .map(|&i| ListItem::new(app.notes[i].name.as_str()))
+            .collect();
+        let list = List::new(items)
+            .block(Block::bordered().title(" Link to... "))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.ac_state);
     }
 }
 
