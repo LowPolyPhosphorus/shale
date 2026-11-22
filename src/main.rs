@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use std::{env, fs, io, path::{Path, PathBuf}};
 
 use ratatui::{
@@ -14,6 +16,13 @@ use std::process::Command;
 enum Focus {
     Notes,
     Links,
+}
+
+struct TaskItem {
+    Note: usize,
+    line: usize,
+    done: bool,
+    text: String,
 }
 
 struct Note {
@@ -64,6 +73,21 @@ struct App {
     ac_query: String,
     ac_matches: Vec<usize>,
     ac_state: ListState,
+    status: String,
+    confirm_delete: bool,
+    prompt_rename: bool,
+    tasks_open: bool,
+    tasks: Vec<TaskItem>,
+    task_state: ListState,
+    tasks_show_done: bool,
+    recent: Vec<PathBuf>,
+    recent_items: Vec<usize>,
+    recent_open: bool,
+    recent_state: ListState,
+    dwell_path: Option<PathBuf>,
+    dwell_since: Instant,
+    stamp: (usize, u128),
+    last_check: Instant,
 }
 
 impl App {
@@ -72,6 +96,7 @@ impl App {
 
         let mut notes: Vec<Note> = WalkDir::new(vault)
             .into_iter()
+            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
             .map(|e| {
@@ -141,6 +166,21 @@ impl App {
             ac_query: String::new(),
             ac_matches: Vec::new(),
             ac_state: ListState::default(),
+            status: String::new(),
+            confirm_delete: false,
+            prompt_rename: false,
+            tasks_open: false,
+            tasks: Vec::new(),
+            task_state: ListState::default(),
+            tasks_show_done: false,
+            recent: Vec::new(),
+            recent_items: Vec::new(),
+            recent_open: false,
+            recent_state: ListState::default(),
+            dwell_path: None,
+            dwell_since: Instant::now(),
+            stamp: vault_stamp(vault),
+            last_check: Instant::now(),
         };
         app.reset_link_selection();
         app
@@ -560,6 +600,278 @@ impl App {
                     self.graph_center = idx;
                     self.graph_sel = 0;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn jumpt_to(&mut self, idx: usize) {
+        if self.list_state.selected() != Some(idx) {
+            if let Some(cur) = self.list_state.selected() {
+                self.history.push(cur);
+            }
+            self.forward.clear();
+            self.list_state.select(Some(idx));
+            self.reset_link_selection();
+        }
+    }
+
+    fn any_popup(&self) -> bool {
+        self.switcher_open
+            || self.prompt_open
+            || self.search_open
+            || self.tag_open
+            || self.graph_open
+            || self.help_open
+            || self.tasks_open
+            || self.recent_open
+            || self.confirm_delete
+    }
+
+    fn tick(&mut self) {
+        let cur = self.selected_note().map(|n| n.path.clone());
+        if cur != self.dwell_path {
+            self.dwell_path = cur;
+            self.dwell_since = Instant::now();
+        } else if let Some(p) = cur {
+            if self.dwell_since.elapsed() >= Duration::from_millis(1500)
+                && self.recent.first() != Some(&p)
+            {
+                self.recent.retaint(|x| x != &P);
+                self.recent.insert(0, p);
+                self.recent.truncate(15);
+            }
+        }
+        
+        if self.last_check.elapsed() >= Duration::from_secs(2) {
+            self.last_check = Instant::now();
+            if self.editor.is_none() && !self.any_popup() {
+                let now = vault_stamp(&self.vault);
+                if now != self.stamp {
+                    self.refresh_after_edit();
+                    self.status = "Vault changed on disk - reloaded".to_string();
+                }
+            }
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        let Some(idx) = self.list_state.selected() else { return };
+        let path = self.notes[idx].path.clone();
+        let name = self.notes[idx].path.clone();
+        let trash = self.vault.join(".trash");
+        if fs::create_dir_all(&trash).is_err() {
+            self.status = "Could not create the .trash folder".to_string();
+            return;
+        }
+        let mut dest = trash.join(format!("{name}.md"));
+        let mut n = 1;
+        while dest.exists() {
+            dest = trash.join(format!("{name} ({n}).md"));
+            n += 1;
+        }
+        match fs::rename(&path, &dest) {
+            Ok(_) => {
+                self.refresh_after_edit();
+                self.status = format!("Moved '{name}' to .trash");
+            }
+            Err(e) => self.status = format!("Delete failed: {e}"),
+        }
+    }
+
+    fn rename_selected(&mut self, new_name: &str) {
+        let Some(idx) = self.list_state.selected() else { return };
+        let clean: String = new_name
+            .trim()
+            .chars()
+            .filter(|c| !"\\/:*?\"<>|".contains(*c))
+            .collect();
+        let old_name = self.notes[idx].name.clone();
+        if clean.is_empty() || clean == old_name {
+            return;
+        }
+        let old_path = self.notes[idx].path.clone();
+        let new_path = old_path.with_file_name(format!("{clean}.md"));
+        if new_path.exists() && clean.to_lowercase() != old_name.to_lowercase() {
+            self.status = format!("'{clean}' already exists");
+            return;
+        }
+
+        let old_lower = old_name.to_lowercase();
+        let to_fix: Vec<PathBuf> = self
+            .notes
+            .iter()
+            .filter(|n| n.links.contains(&old_lower))
+            .map(|n| {
+                if n.path == old_path {
+                    new_path.clone()
+                } else {
+                    n.path.clone()
+                }
+            })
+            .collect();
+
+        if let Err(e) = fs::rename(&old_path, &new_path) {
+            self.status = format!("Rename failed: {e}");
+            return;
+        }
+
+        let pattern = format!(r"\[\[\s*{}\s*([|#]|\]\])", regex::escape(&old_name));
+        let re = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let mut updated = 0;
+        for p in &to_fix {
+            if let Ok(text) = fs::read_to_string(p) {
+                let new_text = re
+                    .replace_all(&text, |caps: &regex::Captures| {
+                        format!("[[{}{}", clean, &caps[1])
+                    })
+                    .into_owned();
+                if new_text != text && fs::write(p, &new_text).is_ok() {
+                    updated += 1;
+                }
+            }
+        }
+
+        self.refresh_after_edit();
+        let lower = clean.to_lowercase();
+        if let Some(i) = self
+            .notes
+            .iter()
+            .position(|n| n.name.to_lowercase() == lower)
+        {
+        self.list_state.select(Some(i));
+        self.reset_link_selection();
+        }
+        self.status = format!("Renamed '{old_name}' to '{clean}' ({updated} notes updated)");
+    }
+
+    fn collect_tasks(&mut self) {
+        self.tasks.clear();
+        for(i, n) in self.notes.iter().enumerate() {
+            let mut in_code = false;
+            for (ln, line) in n.content.lines().enumerate() {
+                if line.trim_start().starts_with("'''") {
+                    in_code = !in_code;
+                    continue;
+                }
+                if in_code {
+                    continue;
+                }
+                if let Some((done, text)) = parse_task(line.trim_start()) {
+                    if done && !self.tasks_show_done {
+                        continue;
+                    }
+                    self.tasks.push(TaskItem {
+                        note: i,
+                        line: ln,
+                        done,
+                        text: text.to_string(),
+                    });
+                }
+            }
+        }
+        let sel = self
+            .task_state
+            .selected()
+            .unwrap_or(0)
+            .min(self.tasks.len().saturating_sub(1));
+        self.task_state
+            .select(if self.tasks.is_empty() { None } else { Some(sel) });
+    }
+
+    fn open_tasks(&mut self) {
+        self.tasks_open = true;
+        self.task_state.select(Some(0));
+        self.collect_taks();
+    }
+
+    fn toggle_task(&mut self) {
+        let Some(sel) = self.task_state.selected() else { return };
+        let Some(t) = self.tasks.get(sel) else { return };
+        let (ni, ln) = (t.note, t.line);
+        let path = self.notes[ni].path.clone();
+        let mut out: Vec<String> = self.notes[ni]
+            .content
+            .lines()
+            .map(|l| l.to_string())
+            .collect();
+        if let Some(line) = out.get_mut(ln) {
+            if line.contains("[ ]") {
+                *line = line.replacen("[ ]", "[x]", 1);
+            } else if line.contains("[x]") {
+                *line = line.replacen("[x]", "[ ]", 1);
+            } else if line.contains("[x]") {
+                *line = line.replacen("[X]", "[ ]");
+            }
+        }
+        let new = format!("{}\n", out.join("\n"));
+        if fs::write(&path, &new).is_ok() {
+            self.notes[ni].links = parse_links(&new);
+            self.notes[ni].content = new;
+            self.stamp = vault_stamp(&self.vault);
+            self.status = "Task updated".to_string();
+        }
+        self.collect_tasks();
+    }
+
+    fn handle_tasks_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.tasks_open = false,
+            KeyCode::Down | KeyCode::Char('j') => self.task_state.select_next()m
+            KeyCode::Up | KeyCode::Char('k') => self.task_state.select_select_previous(),
+            KeyCode::Char(' ') | KeyCode::Char('x') => self.toggle_task(),
+            KeyCode::Char('a') => {
+                self.tasks_show_done = !self.tasks_show_done;
+                self.collect_tasks();
+            }
+            KeyCode::Enter => {
+                let target = self
+                    .task_state
+                    .selected()
+                    .and_then(|i| self.tasks.get(i))
+                    .map(|t| t.note);
+                if let Some(idx) = target {
+                    self.jump_to(idx);
+                }
+                self.tasks_open = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_recent(&mut self) {
+        let current = self.list_state.selected();
+        self.recent_items = self
+            .recent
+            .iter()
+            .filter_map(|p| self.note.iter().position(|n| n.path == *p))
+            .filter(|&i| Some(i) != current)
+            .collect();
+        self.recent_state.select(if self.recent_items.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+        self.recent_open = true;
+    }
+
+    fn handle_recent_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.recent_open = false,
+            KeyCode::Down | KeyCode::Char('j') => self.recent_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.recent_state.select_previous(),
+            KeyCode::Enter => {
+                let target = self
+                    .recent_state
+                    .selected()
+                    .and_then(|i| self.recent_items.get(i).copied());
+                if let Some(idx) = target {
+                    self.jumpt_to(idx);
+                }
+                self.recent_open = false;
             }
             _ => {}
         }
@@ -1065,6 +1377,92 @@ fn ac_query(ta: &TextArea) -> Option<String> {
         return None;
     }
     Some(after.to_string())
+}
+
+fn parse_task(trimmed: &str) -> Option<(bool, &str)> {
+    for p in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(p) {
+            if let Some(t) = rest.strip_prefix("[ ] ") {
+                return Some((false, t));
+            }
+            if let Some(t) = rest
+                .strip_prefix("[x] ")
+                .or_else(|| rest.strip_prefix("[X] "))
+            {
+                return Some((true, t));
+            }
+        }
+    }
+    None
+}
+
+fn link_original(content: &str, lower: &str) -> Option<String> {
+    let re = Regex::new(r"\[\[([^\]|$]+)(?:[#|][^\]]*)?\]\]").unwrap();
+    re.captures_iter(content)
+        .map(|c| c[1].trim().to_string())
+        .find(|s| s.to_lowercase() == lower)
+}
+
+fn vault_stamp(vault: &Path) -> (usize, u128) {
+    let mut count = 0usize;
+    let mut sum = 0u128;
+    for e in WalkDir::new(vault)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
+        .filter_map(|e| e.ok())
+    {
+        if e.path().extension().map_or(false, |x| x == "md") {
+            count += 1;
+            if let Ok(m) = e.metadata() {
+                if let Ok(t) = m.modified() {
+                    if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                        sum = sum.wrapping_add(d.as_nanos());
+                    }
+                }
+            }
+        }
+    }
+    (count, sum)
+}
+
+fn config_path() -> Option<PathBuf> {
+    let base = env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(Base.join("shale").join("config.txt"))
+}
+
+fn read_config() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(text) = config_path().and_then(|p| fs::read_to_string(p).ok()) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                map.insert(
+                    k.trim().to_lowercase(),
+                    v.trim().trim_matches('"').to_string(),
+                );
+            }
+        }
+    }
+    map
+}
+
+fn write_config(map: &std::collections::HashMap<String, String>) -> io::Result<PathBuf> {
+    let path = config_path()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no config folder found"))?';
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let text: String = keys.iter().map(|k| format!("{k} = {}\n", map[*k])).collect();
+    fs::write(&path, text)?;
+    Ok(path)
 }
 
 fn ui(frame: &mut Frame, app: &mut App) {
