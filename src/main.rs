@@ -1,13 +1,7 @@
 use std::{env, fs, io, path::{Path, PathBuf}};
 
 use ratatui::{
-    crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind, MouseButton},
-    crossterm::execute,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    DefaultTerminal, Frame,
+    DefaultTerminal, Frame, crossterm::{event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind}, execute, style::Color::Cyan}, layout::{Constraint, Layout, Rect}, style::{Color, Modifier, Style}, text::{Line, Span}, widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use walkdir::WalkDir;
 use regex::Regex;
@@ -65,6 +59,7 @@ struct App {
     graph_adj: Vec<Vec<usize>>,
     graph_depth: u8,
     graph_sel: usize,
+    help_open: bool,
 }
 
 impl App {
@@ -137,6 +132,7 @@ impl App {
             graph_adj: Vec::new(),
             graph_depth: 2,
             graph_sel: 0,
+            help_open: false,
         };
         app.reset_link_selection();
         app
@@ -664,6 +660,10 @@ impl App {
             self.handle_graph_key(code);
             return;
         }
+        if self.help_open {
+            self.help_open = false;
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
@@ -700,6 +700,7 @@ impl App {
             KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('t') => self.open_tags(),
             KeyCode::Char('g') => self.open_graph(),
+            KeyCode::Char('?') => self.help_open = true,
             _ => {}
         }
     }
@@ -1261,6 +1262,48 @@ fn ui(frame: &mut Frame, app: &mut App) {
             });
         frame.render_widget(Clear, area);
         frame.render_widget(canvas, area);
+    }
+
+    if app.help_open {
+        let head = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let lines: Vec<Line> = vec![
+            Line::styled("Move around", head),
+            Line::from("  j / k, arrows   move in the focused list"),
+            Line::from("  Tab             switch Notes / Links focus"),
+            Line::from("  Enter           follow the selected link"),
+            Line::from("  Backspace, h    back         l  forward"),
+            Line::from("  PgUp / PgDn     scroll the preview (or mouse wheel)"),
+            Line::from("  click           select a note or follow a link"),
+            Line::styled("Find", head),
+            Line::from("  Ctrl+P          quick switcher"),
+            Line::from("  /               search inside all notes"),
+            Line::from("  t               browse tags"),
+            Line::from("  g               graph view"),
+            Line::styled("Write", head),
+            Line::from("  e               edit in the app (Ctrl+S save, Esc exit)"),
+            Line::from("  E               edit in an external editor"),
+            Line::from("  n               new note        d   daily note"),
+            Line::styled("Other", head),
+            Line::from("  r               reload the vault from disk"),
+            Line::from("  ?               this help"),
+            Line::from("  q, Esc          quit"),
+            Line::from(""),
+            Line::styled("Press any key to close", Style::new().fg(Color::DarkGray)),
+        ];
+        let area = frame.area();
+        let w = (area.width * 7 / 10).max(50).min(area.width);
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let popup = Rect::new(
+            area.x + (area.width - w) / 2,
+            area.y + area.height.saturating_sub(h) / 2,
+            w,
+            h,
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(" Help ")),
+            popup,
+        );
     }
 }
 
