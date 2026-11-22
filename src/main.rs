@@ -1,14 +1,26 @@
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, path::{Path, PathBuf}};
 
 use ratatui::{
-    DefaultTerminal, Frame, crossterm::{event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind}, execute, style::Color::Cyan}, layout::{Constraint, Layout, Rect}, style::{Color, Modifier, Style}, text::{Line, Span}, widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    crossterm::{
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+            KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        },
+        execute,
+    },
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    symbols::Marker,
+    text::{Line, Span},
+    widgets::{
+        canvas::{Canvas, Line as CanvasLine},
+        Block, Clear, List, ListItem, ListState, Paragraph, Wrap,
+    },
+    DefaultTerminal, Frame,
 };
 use walkdir::WalkDir;
 use regex::Regex;
-use ratatui::symbols::Marker;
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use tui_textarea::{CursorMove, TextArea};
 use std::process::Command;
 
@@ -19,7 +31,7 @@ enum Focus {
 }
 
 struct TaskItem {
-    Note: usize,
+    note: usize,
     line: usize,
     done: bool,
     text: String,
@@ -117,7 +129,7 @@ impl App {
                 }
             })
             .collect();
-        
+
         notes.sort_by_key(|n| n.name.to_lowercase());
 
         let mut list_state = ListState::default();
@@ -204,7 +216,7 @@ impl App {
 
     fn scroll_preview(&mut self, delta: i32) {
         self.preview_scroll = (self.preview_scroll as i32 + delta).max(0) as u16;
-        if self.editor.is_some() || self.graph_open {
+        if self.editor.is_some() || self.any_popup() {
             return;
         }
     }
@@ -213,6 +225,7 @@ impl App {
         let keep = self.selected_note().map(|n| n.path.clone());
         let fresh = App::new(&self.vault);
         self.notes = fresh.notes;
+        self.stamp = fresh.stamp;
         let idx = keep
             .and_then(|p| self.notes.iter().position(|n| n.path == p))
             .or(if self.notes.is_empty() { None } else { Some(0) });
@@ -223,11 +236,27 @@ impl App {
     }
 
     fn refresh_after_edit(&mut self) {
-        let history = std::mem::take(&mut self.history);
-        let forward = std::mem::take(&mut self.forward);
+        let hist: Vec<PathBuf> = self
+            .history
+            .iter()
+            .filter_map(|&i| self.notes.get(i))
+            .map(|n| n.path.clone())
+            .collect();
+        let fwd: Vec<PathBuf> = self
+            .forward
+            .iter()
+            .filter_map(|&i| self.notes.get(i))
+            .map(|n| n.path.clone())
+            .collect();
         self.reload();
-        self.history = history;
-        self.forward = forward;
+        self.history = hist
+            .iter()
+            .filter_map(|p| self.notes.iter().position(|n| n.path == *p))
+            .collect();
+        self.forward = fwd
+            .iter()
+            .filter_map(|p| self.notes.iter().position(|n| n.path == *p))
+            .collect();
     }
 
     fn create_note(&mut self, name: &str) {
@@ -251,7 +280,10 @@ impl App {
             self.reset_link_selection();
         }
         if is_new {
+            self.status = format!("Created {clean}");
             self.start_editing();
+        } else {
+            self.status = format!("Opened existing note {clean}");
         }
     }
 
@@ -281,6 +313,8 @@ impl App {
             self.notes[idx].content =text;
             self.editor_dirty = false;
             self.discard_warned = false;
+            self.stamp = vault_stamp(&self.vault);
+            self.status = "Saved".to_string();
         }
     }
 
@@ -605,7 +639,7 @@ impl App {
         }
     }
 
-    fn jumpt_to(&mut self, idx: usize) {
+    fn jump_to(&mut self, idx: usize) {
         if self.list_state.selected() != Some(idx) {
             if let Some(cur) = self.list_state.selected() {
                 self.history.push(cur);
@@ -637,7 +671,7 @@ impl App {
             if self.dwell_since.elapsed() >= Duration::from_millis(1500)
                 && self.recent.first() != Some(&p)
             {
-                self.recent.retaint(|x| x != &P);
+                self.recent.retain(|x| x != &p);
                 self.recent.insert(0, p);
                 self.recent.truncate(15);
             }
@@ -658,7 +692,7 @@ impl App {
     fn delete_selected(&mut self) {
         let Some(idx) = self.list_state.selected() else { return };
         let path = self.notes[idx].path.clone();
-        let name = self.notes[idx].path.clone();
+        let name = self.notes[idx].name.clone();
         let trash = self.vault.join(".trash");
         if fs::create_dir_all(&trash).is_err() {
             self.status = "Could not create the .trash folder".to_string();
@@ -785,7 +819,7 @@ impl App {
     fn open_tasks(&mut self) {
         self.tasks_open = true;
         self.task_state.select(Some(0));
-        self.collect_taks();
+        self.collect_tasks();
     }
 
     fn toggle_task(&mut self) {
@@ -803,8 +837,8 @@ impl App {
                 *line = line.replacen("[ ]", "[x]", 1);
             } else if line.contains("[x]") {
                 *line = line.replacen("[x]", "[ ]", 1);
-            } else if line.contains("[x]") {
-                *line = line.replacen("[X]", "[ ]");
+            } else if line.contains("[X]") {
+                *line = line.replacen("[X]", "[ ]", 1);
             }
         }
         let new = format!("{}\n", out.join("\n"));
@@ -820,8 +854,8 @@ impl App {
     fn handle_tasks_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc | KeyCode::Char('q') => self.tasks_open = false,
-            KeyCode::Down | KeyCode::Char('j') => self.task_state.select_next()m
-            KeyCode::Up | KeyCode::Char('k') => self.task_state.select_select_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.task_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.task_state.select_previous(),
             KeyCode::Char(' ') | KeyCode::Char('x') => self.toggle_task(),
             KeyCode::Char('a') => {
                 self.tasks_show_done = !self.tasks_show_done;
@@ -847,7 +881,7 @@ impl App {
         self.recent_items = self
             .recent
             .iter()
-            .filter_map(|p| self.note.iter().position(|n| n.path == *p))
+            .filter_map(|p| self.notes.iter().position(|n| n.path == *p))
             .filter(|&i| Some(i) != current)
             .collect();
         self.recent_state.select(if self.recent_items.is_empty() {
@@ -869,7 +903,7 @@ impl App {
                     .selected()
                     .and_then(|i| self.recent_items.get(i).copied());
                 if let Some(idx) = target {
-                    self.jumpt_to(idx);
+                    self.jump_to(idx);
                 }
                 self.recent_open = false;
             }
@@ -878,16 +912,16 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, code: KeyCode) {
-        if self.graph_open {
-            self.handle_graph_key(code);
-            return;
-        }
         match code {
             KeyCode::Esc => self.prompt_open = false,
             KeyCode::Enter => {
                 let name = std::mem::take(&mut self.prompt_text);
                 self.prompt_open = false;
-                self.create_note(&name);
+                if self.prompt_rename {
+                    self.rename_selected(&name);
+                } else {
+                    self.create_note(&name);
+                }
             }
             KeyCode::Backspace => {
                 self.prompt_text.pop();
@@ -961,17 +995,20 @@ impl App {
         let Some(note) = self.selected_note() else { return };
         let Some(i) = self.link_state.selected() else { return };
         let Some(target) = note.links.get(i) else { return };
+        let original = link_original(&note.content, &target).unwrap_or_else(|| target.clone());
         let found = self
             .notes
             .iter()
             .position(|n| n.name.to_lowercase() == *target);
-        if let Some(idx) = found {
-            if let Some(cur) = self.list_state.selected() {
-                self.history.push(cur);
+        match found {
+            Some(idx) => self.jump_to(idx),
+            None => {
+                if let Some(cur) = self.list_state.selected() {
+                    self.history.push(cur);
+                }
+                self.forward.clear();
+                self.create_note(&original);
             }
-            self.forward.clear();
-            self.list_state.select(Some(idx));
-            self.reset_link_selection();
         }
     }
 
@@ -996,6 +1033,9 @@ impl App {
     }
 
     fn handle_click(&mut self, x: u16, y: u16) {
+        if self.editor.is_some() || self.any_popup() {
+            return;
+        }
         if let Some(row) = row_in(self.notes_area, x, y) {
             let idx = row + self.list_state.offset();
             if idx < self.notes.len() {
@@ -1023,9 +1063,6 @@ impl App {
                     self.reset_link_selection();
                 }
             }
-        }
-        if self.editor.is_some() {
-            return;
         }
     }
 
@@ -1065,6 +1102,21 @@ impl App {
             self.help_open = false;
             return;
         }
+        if self.confirm_delete {
+            self.confirm_delete = false;
+            if code == KeyCode::Char('y') {
+                self.delete_selected();
+            }
+            return;
+        }
+        if self.tasks_open {
+            self.handle_tasks_key(code);
+            return;
+        }
+        if self.recent_open {
+            self.handle_recent_key(code);
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
@@ -1095,6 +1147,7 @@ impl App {
             KeyCode::Char('E') => self.edit_requested = true,
             KeyCode::Char('n') => {
                 self.prompt_text.clear();
+                self.prompt_rename = false;
                 self.prompt_open = true;
             }
             KeyCode::Char('d') => self.open_daily(),
@@ -1102,6 +1155,20 @@ impl App {
             KeyCode::Char('t') => self.open_tags(),
             KeyCode::Char('g') => self.open_graph(),
             KeyCode::Char('?') => self.help_open = true,
+            KeyCode::Char('D') => {
+                if self.selected_note().is_some() {
+                    self.confirm_delete = true;
+                }
+            }
+            KeyCode::Char('R') => {
+                if let Some(name) = self.selected_note().map(|n| n.name.clone()) {
+                    self.prompt_text = name;
+                    self.prompt_rename = true;
+                    self.prompt_open = true;
+                }
+            }
+            KeyCode::Char('T') => self.open_tasks(),
+            KeyCode::Char('o') => self.open_recent(),
             _ => {}
         }
     }
@@ -1297,6 +1364,24 @@ fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
             continue;
         }
 
+        // Tasks: - [ ] and - [x]
+        if let Some((done, text)) = parse_task(trimmed) {
+            let (mark, mark_style) = if done {
+                ("☑ ", Style::new().fg(Color::Green))
+            } else {
+                ("☐ ", Style::new().fg(Color::Yellow))
+            };
+            let body_style = if done {
+                dim.add_modifier(Modifier::CROSSED_OUT)
+            } else {
+                Style::new()
+            };
+            let mut spans = vec![Span::raw(indent.to_string()), Span::styled(mark, mark_style)];
+            spans.extend(inline_spans(text, body_style));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        
         // Bullet lists (-, *, +), nested by indentation
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
             let depth = indent.len() / 2;
@@ -1326,10 +1411,12 @@ fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 fn parse_links(content: &str) -> Vec<String> {
-    let re = Regex::new(r"\[\[([^\]|#]+)(?:[#|]^\]]*)?\]\]").unwrap();
-    re.captures_iter(content)
+    let re = Regex::new(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]").unwrap();
+    let links: Vec<String> = re
+        .captures_iter(content)
         .map(|c| c[1].trim().to_lowercase())
-        .collect()
+        .collect();
+    links
 }
 
 fn parse_tags(content: &str) -> Vec<String> {
@@ -1397,19 +1484,21 @@ fn parse_task(trimmed: &str) -> Option<(bool, &str)> {
 }
 
 fn link_original(content: &str, lower: &str) -> Option<String> {
-    let re = Regex::new(r"\[\[([^\]|$]+)(?:[#|][^\]]*)?\]\]").unwrap();
-    re.captures_iter(content)
+    let re = Regex::new(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]").unwrap();
+    let found = re
+        .captures_iter(content)
         .map(|c| c[1].trim().to_string())
-        .find(|s| s.to_lowercase() == lower)
+        .find(|s| s.to_lowercase() == lower);
+    found
 }
 
 fn vault_stamp(vault: &Path) -> (usize, u128) {
     let mut count = 0usize;
     let mut sum = 0u128;
     for e in WalkDir::new(vault)
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
-        .filter_map(|e| e.ok())
+            .into_iter()
+            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
+            .filter_map(|e| e.ok())
     {
         if e.path().extension().map_or(false, |x| x == "md") {
             count += 1;
@@ -1430,7 +1519,7 @@ fn config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(Base.join("shale").join("config.txt"))
+    Some(base.join("shale").join("config.txt"))
 }
 
 fn read_config() -> std::collections::HashMap<String, String> {
@@ -1454,7 +1543,7 @@ fn read_config() -> std::collections::HashMap<String, String> {
 
 fn write_config(map: &std::collections::HashMap<String, String>) -> io::Result<PathBuf> {
     let path = config_path()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no config folder found"))?';
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no config folder found"))?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -1463,12 +1552,13 @@ fn write_config(map: &std::collections::HashMap<String, String>) -> io::Result<P
     let text: String = keys.iter().map(|k| format!("{k} = {}\n", map[*k])).collect();
     fs::write(&path, text)?;
     Ok(path)
-}
+} 
 
 fn ui(frame: &mut Frame, app: &mut App) {
+    let [body, status_area] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     let [left, right] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .areas(frame.area());
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(body);
     let [preview_area, links_area] =
         Layout::vertical([Constraint::Min(5), Constraint::Length(10)]).areas(right);
     let [out_area, back_area] = 
@@ -1478,6 +1568,33 @@ fn ui(frame: &mut Frame, app: &mut App) {
     app.links_rect = out_area;
     app.back_rect = back_area;
     
+    let status_line = if app.confirm_delete {
+        let name = app
+            .selected_note()
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        Line::styled(
+            format!(" Move '{name}' to .trash? (y = yes, any other key = cancel) "),
+            Style::new().fg(Color::Black).bg(Color::Red),
+        )
+    } else if !app.status.is_empty() {
+        Line::styled(
+            format!(" {} ", app.status),
+            Style::new().fg(Color::Black).bg(Color::Green),
+        )
+    } else {
+        let vault_name = app
+            .vault
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "vault".to_string());
+        Line::styled(
+            format!(" {} | {} notes | ? help ", vault_name, app.notes.len()),
+            Style::new().fg(Color::DarkGray),
+        )
+    };
+    frame.render_widget(Paragraph::new(status_line), status_area);
+
     // Left pane: note list
     let items: Vec<ListItem> = app
         .notes
@@ -1782,6 +1899,9 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  e               edit in the app (Ctrl+S save, Esc exit)"),
             Line::from("  E               edit in an external editor"),
             Line::from("  n               new note        d   daily note"),
+            Line::from("  R               rename (updates links)    D   delete to .trash"),
+            Line::from("  T               task list (Space toggles)"),
+            Line::from("  o               recent notes"),
             Line::styled("Other", head),
             Line::from("  r               reload the vault from disk"),
             Line::from("  ?               this help"),
@@ -1803,6 +1923,63 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Paragraph::new(lines).block(Block::bordered().title(" Help ")),
             popup,
         );
+    }
+
+    if app.tasks_open {
+        let area = frame.area();
+        let w = area.width * 8 / 10;
+        let h = area.height.saturating_sub(4);
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .tasks
+            .iter()
+            .map(|t| {
+                let (mark, style) = if t.done {
+                    ("☑ ", Style::new().fg(Color::Green))
+                } else {
+                    ("☐ ", Style::new().fg(Color::Yellow))
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(mark, style),
+                    Span::raw(t.text.clone()),
+                    Span::styled(
+                        format!("  - {}", app.notes[t.note].name),
+                        Style::new().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+        let title = format!(
+            " Tasks ({}) - Space = toggle, Enter = open note, a = {} done, Esc = close",
+            app.tasks.len(),
+            if app.tasks_show_done { "hide" } else { "show" } 
+        );
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.task_state);
+    }
+
+    if app.recent_open {
+        let area = frame.area();
+        let w = area.width * 5 / 10;
+        let h = (app.recent_items.len() as u16 + 2)
+            .max(3)
+            .min(area.height.saturating_sub(4));
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h,);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .recent_items
+            .iter()
+            .map(|&i| ListItem::new(app.notes[i].name.as_str()))
+            .collect();
+        let list = List::new(items)
+            .block(Block::bordered().title(" Recent - Enter = open, Esc = close "))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.recent_state);
     }
 
     if app.ac_open {
@@ -1833,7 +2010,10 @@ fn open_editor(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> 
     let Some(path) = app.selected_note().map(|n| n.path.clone()) else {
         return Ok (());
     };
-    let editor = env::var("EDITOR").unwrap_or_else(|_| {
+    let editor = env::var("EDITOR")
+    .ok()
+    .or_else(|| read_config().get("editor").cloned())
+    .unwrap_or_else(|| {
         if cfg!(windows) { "notepad".to_string() } else { "vi".to_string() }
     });
 
@@ -1859,26 +2039,32 @@ fn open_editor(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> 
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
         terminal.draw(|f| ui(f, app))?;
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if app.editor.is_some() {
-                    app.handle_editor_key(key);
-                } else if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-                    app.open_switcher();
-                } else {
-                    app.handle_key(key.code);
+        if event::poll(Duration::from_millis(500))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    app.status.clear();
+                    if app.editor.is_some() {
+                        app.handle_editor_key(key);
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('p')
+                    {
+                        app.open_switcher();
+                    } else {
+                        app.handle_key(key.code);
+                    }
                 }
-            }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollDown => app.scroll_preview(3),
-                MouseEventKind::ScrollUp => app.scroll_preview(-3),
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.handle_click(mouse.column, mouse.row)
-                }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => app.scroll_preview(3),
+                    MouseEventKind::ScrollUp => app.scroll_preview(-3),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        app.handle_click(mouse.column, mouse.row)
+                    }
+                    _ => {}
+                },
                 _ => {}
-            },
-            _ => {}
+            }
         }
+        app.tick();
         if app.edit_requested {
             app.edit_requested = false;
             open_editor(terminal, app)?;
@@ -1888,7 +2074,26 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    let vault = env::args().nth(1).unwrap_or_else(|| ".".to_string());
+    let args: Vec<String> = env::args().skip(1).collect();
+    let mut config = read_config();
+
+    if args.len() == 2 && args[0] == "--set-vault" {
+        config.insert("vault".to_string(), args[1].clone());
+        let path = write_config(&config)?;
+        println!("Saved vault path to {}", path.display());
+        return Ok(());
+    }
+
+    let vault = args
+        .first()
+        .cloned()
+        .or_else(|| config.get("vault").cloned())
+        .unwrap_or_else(|| ".".to_string());
+    if !Path::new(&vault).is_dir() {
+        eprintln!("Vault folder not found: {vault}");
+        return Ok(());
+    }
+
     let mut app = App::new(Path::new(&vault));
 
     let mut terminal = ratatui::init();
