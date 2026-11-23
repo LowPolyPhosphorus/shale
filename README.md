@@ -85,6 +85,11 @@ shale
 
 Rename and delete change real files, so try them on a copy first
 
+## Why
+
+I wanted my notes from Obsidian to stay in plain markdown and I made shale to open existing vaults as is.
+It runs in any terminal, starts instantly, and gives you links, backlinks, graphs, and a search without a heavy app.
+
 ## Keys
 
 | Key | Action |
