@@ -36,9 +36,9 @@ Shale reads a folder of `.md` files, the same layout Obsidian uses, so you can p
 - Rename (updates links), delete to `.trash`, daily notes
 - Live reload when files change on disk
 
-![Graph view](images\graph.png)
+![Graph view](images/graph.png)
 
-![Editor](images\editor.png)
+![Editor](images/editor.png)
 
 ## Install
 
