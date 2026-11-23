@@ -21,13 +21,13 @@ jobs:
           - os: macos-latest
             file: shale
             name: shale-macos
-      runs-on: ${{ matrix.os }}
-      steps:
-        - uses: actions/checkout@v4
-        - uses: dtolnay/rust-toolchain@stable
-        - run: cargo build --release
-        - run: cp target/release/${{ matrix.file }} ${{ matrix.name }}
-        - shell: bash
-        - uses: softprops/action-gh-release@v2
-          with:
-            files: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cp target/release/${{ matrix.file }} ${{ matrix.name }}
+        shell: bash
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.name }}
