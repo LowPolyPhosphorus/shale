@@ -42,7 +42,29 @@ Shale reads a folder of `.md` files, the same layout Obsidian uses, so you can p
 
 ## Install
 
-Download the latest build from the Releases page, or with Rust installed:
+Download the latest build for your OS from the [latest release](https://github.com/LowPolyPhosphorus/shale/releases/latest):
+
+| System | File |
+| --- | --- |
+| Windows | `shale-windows.exe` |
+| Linux | `shale-linux` |
+| macOS (Apple Silicon) | `shale-macos` |
+
+Run it through terminal, not double clicking:
+
+```
+.\shale-windows.exe --set-vault "C:\path\to\your\vault"
+.\shale-windows.exe
+```
+
+On macOS and Linux mark the file as runnable first:
+
+```
+chmod +x shale-linux
+./shale-linux --set-vault ~/path/to/your/vault
+```
+
+If you have Rust installed, you can also build it yourself:
 
 ```
 cargo install --git https://github.com/LowPolyPhosphorus/shale
