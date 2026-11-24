@@ -44,6 +44,7 @@ struct Note {
     content: String,
     links: Vec<String>,
     modified: std::time::SystemTime,
+    rel: String,
 }
 
 struct App {
@@ -135,6 +136,12 @@ impl App {
                     modified: fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .unwrap_or(std::time::UNIX_EPOCH),
+                    rel: path
+                        .strip_prefix(vault)
+                        .unwrap_or(path.as_path())
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
                     path,
                     content,
                     links,
@@ -142,7 +149,7 @@ impl App {
             })
             .collect();
 
-        notes.sort_by_key(|n| n.name.to_lowercase());
+        notes.sort_by_key(|n| n.rel.to_lowercase());
 
         let mut list_state = ListState::default();
         if !notes.is_empty() {
@@ -1774,7 +1781,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = app
         .notes
         .iter()
-        .map(|n| ListItem::new(n.name.as_str()))
+        .map(|n| ListItem::new(n.rel.as_str()))
         .collect();
     let list = List::new(items)
         .block(
