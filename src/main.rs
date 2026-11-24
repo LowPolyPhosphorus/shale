@@ -1,4 +1,3 @@
-use std::string;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, path::{Path, PathBuf}};
 
@@ -110,6 +109,8 @@ struct App {
     outline_open: bool,
     outline_items: Vec<(usize, usize, String)>,
     outline_state: ListState,
+    show_left: bool,
+    show_links: bool,
 }
 
 impl App {
@@ -219,6 +220,8 @@ impl App {
             outline_open: false,
             outline_items: Vec::new(),
             outline_state: ListState::default(),
+            show_left: true,
+            show_links: true,
         };
         app.reset_link_selection();
         app
@@ -1731,10 +1734,15 @@ fn write_config(map: &std::collections::HashMap<String, String>) -> io::Result<P
 fn ui(frame: &mut Frame, app: &mut App) {
     let [body, status_area] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(body);
+    let left_pct: u16 = if app.show_left { 30 } else { 0 };
+    let links_h: u16 = if app.show_links { 10 } else { 0 };
+    let [left, right] = Layout::horizontal([
+        Constraint::Percentage(left_pct),
+        Constraint::Percentage(100 - left_pct),
+    ])
+    .areas(body);
     let [preview_area, links_area] =
-        Layout::vertical([Constraint::Min(5), Constraint::Length(10)]).areas(right);
+        Layout::vertical([Constraint::Min(5), Constraint::Length(links_h)]).areas(right);
     let [out_area, back_area] = 
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .areas(links_area);
@@ -2073,6 +2081,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  PgUp / PgDn     scroll the preview (or mouse wheel)"),
             Line::from("  click           select a note or follow a link"),
             Line::from("  Ctrl+D/Ctrl+U   half-page down/up"),
+            Line::from("  Ctrl+B/Ctrl+O   hide or show notes list / links panes"),
             Line::styled("Find", head),
             Line::from("  Ctrl+P          quick switcher"),
             Line::from("  /               search inside all notes"),
@@ -2304,6 +2313,16 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                             let half = (rows.saturating_sub(11) / 2).max(1) as i32;
                             let delta = if key.code == KeyCode::Char('d') { half } else { -half };
                             app.scroll_preview(delta);
+                        }
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('o'))
+                    {
+                        if !app.any_popup() {
+                            if key.code == KeyCode::Char('b') {
+                                app.show_left = !app.show_left;
+                            } else {
+                                app.show_links = !app.show_links;
+                            }
                         }
                     } else {
                         app.handle_key(key.code);
