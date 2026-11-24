@@ -1,3 +1,4 @@
+use std::string;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, path::{Path, PathBuf}};
 
@@ -69,7 +70,7 @@ struct App {
     discard_warned: bool,
     search_open: bool,
     search_query: String,
-    search_results: Vec<(usize, String)>,
+    search_results: Vec<(usize, usize, String)>,
     search_state: ListState,
     tag_open: bool,
     tag_list: Vec<(String, Vec<usize>)>,
@@ -100,6 +101,9 @@ struct App {
     dwell_since: Instant,
     stamp: (usize, u128),
     last_check: Instant,
+    health_open: bool,
+    health_items: Vec<(usize, String)>,
+    health_state: ListState,
 }
 
 impl App {
@@ -189,6 +193,9 @@ impl App {
             recent_items: Vec::new(),
             recent_open: false,
             recent_state: ListState::default(),
+            health_open: false,
+            health_items: Vec::new(),
+            health_state: ListState::default(),
             dwell_path: None,
             dwell_since: Instant::now(),
             stamp: vault_stamp(vault),
@@ -427,7 +434,7 @@ impl App {
     fn open_search(&mut self) {
         self.search_open = true;
         self.search_query.clear();
-        self.update_matches();
+        self.update_search();
     }
 
     fn update_search(&mut self) {
@@ -435,9 +442,9 @@ impl App {
         let q = self.search_query.to_lowercase();
         if q.chars().count() >= 2 {
             'outer: for (i, n) in self.notes.iter().enumerate() {
-                for line in n.content.lines() {
-                        if line.to_lowercase().contains(&q ) {
-                        self.search_results.push((i, line.trim().to_string()));
+                for (ln, line) in n.content.lines().enumerate() {
+                    if line.to_lowercase().contains(&q ) {
+                        self.search_results.push((i, ln, line.trim().to_string()));
                         if self.search_results.len() >= 200 {
                             break 'outer;
                         }
@@ -456,18 +463,20 @@ impl App {
         match code {
             KeyCode::Esc => self.search_open = false,
             KeyCode::Enter => {
-                let picked = self 
+                let picked = self
                     .search_state
                     .selected()
                     .and_then(|i| self.search_results.get(i))
-                    .map(|(idx, _)| *idx);
-                if let Some(idx) = picked {
-                    if let Some(cur) = self.list_state.selected() {
-                        self.history.push(cur);
-                    }
-                    self.forward.clear();
-                    self.list_state.select(Some(idx));
-                    self.reset_link_selection();
+                    .map(|(idx, ln, _)| (*idx, *ln));
+                if let Some((idx, ln)) = picked {
+                    self.jump_to(idx);
+                    let prefix: String = self.notes[idx]
+                        .content
+                        .lines()
+                        .take(ln)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
                 }
                 self.search_open = false;
             }
@@ -659,6 +668,7 @@ impl App {
             || self.help_open
             || self.tasks_open
             || self.recent_open
+            || self.health_open
             || self.confirm_delete
     }
 
@@ -787,7 +797,7 @@ impl App {
         for(i, n) in self.notes.iter().enumerate() {
             let mut in_code = false;
             for (ln, line) in n.content.lines().enumerate() {
-                if line.trim_start().starts_with("'''") {
+                if line.trim_start().starts_with("```") {
                     in_code = !in_code;
                     continue;
                 }
@@ -890,6 +900,67 @@ impl App {
             Some(0)
         });
         self.recent_open = true;
+    }
+
+    fn open_health(&mut self) {
+        use std::collections::HashSet;
+        let names: HashSet<String> =
+            self.notes.iter().map(|n| n.name.to_lowercase()).collect();
+        
+        let mut linked_to: HashSet<String> = HashSet::new();
+        for n in &self.notes {
+            let me = n.name.to_lowercase();
+            for l in &n.links {
+                if *l != me {
+                    linked_to.insert(l.clone());
+                }
+            }
+        }
+
+        let mut items: Vec<(usize, String)> = Vec::new();
+
+        for (i, n) in self.notes.iter().enumerate() {
+            let mut seen: HashSet<&String> = HashSet::new();
+            for l in &n.links {
+                if !names.contains(l) && seen.insert(l) {
+                    items.push((i, format!("missing [[{l}]] in {}", n.name)));
+                }
+            }
+        }
+
+        for (i, n) in self.notes.iter().enumerate() {
+            let me = n.name.to_lowercase();
+            let has_out = n.links.iter().any(|l| *l != me && names.contains(l));
+            let has_in = linked_to.contains(&me);
+            if !has_out && !has_in {
+                items.push((i, format!("orphan {}", n.name)));
+            }
+        }
+
+        self.health_state
+            .select(if items.is_empty() { None } else { Some(0) });
+        self.health_items = items;
+        self.health_open = true;
+    }
+
+    fn handle_health_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.health_open = false,
+            KeyCode::Down | KeyCode::Char('j') => self.health_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.health_state.select_previous(),
+            KeyCode::Enter => {
+                let target = self
+                    .health_state
+                    .selected()
+                    .and_then(|i| self.health_items.get(i))
+                    .map(|(idx, _)| *idx);
+                if let Some(idx) = target {
+                    self.jump_to(idx);
+                }
+                self.health_open = false;
+            }
+            _ => {}
+        }
     }
 
     fn handle_recent_key(&mut self, code: KeyCode) {
@@ -1109,6 +1180,10 @@ impl App {
             }
             return;
         }
+        if self.health_open {
+            self.handle_health_key(code);
+            return;
+        }
         if self.tasks_open {
             self.handle_tasks_key(code);
             return;
@@ -1169,6 +1244,7 @@ impl App {
             }
             KeyCode::Char('T') => self.open_tasks(),
             KeyCode::Char('o') => self.open_recent(),
+            KeyCode::Char('u') => self.open_health(),
             _ => {}
         }
     }
@@ -1750,7 +1826,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let items: Vec<ListItem> = app
             .search_results
             .iter()
-            .map(|(i, snippet)| {
+            .map(|(i, _, snippet)| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{}: ", app.notes[*i].name),
@@ -1895,6 +1971,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  /               search inside all notes"),
             Line::from("  t               browse tags"),
             Line::from("  g               graph view"),
+            Line::from("  u               unresolved links and orphans"),
             Line::styled("Write", head),
             Line::from("  e               edit in the app (Ctrl+S save, Esc exit)"),
             Line::from("  E               edit in an external editor"),
@@ -1980,6 +2057,35 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, popup, &mut app.recent_state);
+    }
+
+    if app.health_open {
+        let area = frame.area();
+        let w = area.width * 8 / 10;
+        let h = area.height.saturating_sub(4);
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .health_items
+            .iter()
+            .map(|(_, text)| {
+                let color = if text.starts_with("missing") {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                ListItem::new(Span::styled(text.clone(), Style::new().fg(color)))
+            })
+            .collect();
+        let title = format!(
+            " Unresolved links and orphans ({}) - Enter = open, Esc = close ",
+            app.health_items.len()
+        );
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.health_state);
     }
 
     if app.ac_open {
