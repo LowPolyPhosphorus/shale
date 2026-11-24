@@ -291,23 +291,33 @@ impl App {
             .collect();
     }
 
+    fn current_dir(&self) -> PathBuf {
+        self.selected_note()
+            .and_then(|n| n.path.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| self.vault.clone())
+    }
+
     fn create_note(&mut self, name: &str) {
+        let dir = self.current_dir();
+        self.create_note_in(&dir, name);
+    }
+
+    fn create_note_in(&mut self, dir: &Path, name: &str) {
         let clean: String = name
             .trim()
             .chars()
-            .filter(|c| !"\\/:*?\"<>|".contains(*c))
+            .filter(|c| !"\\/:*?\"<>".contains(*c))
             .collect();
         if clean.is_empty() {
-            return;
+            return ;
         }
-        let path = self.vault.join(format!("{clean}.md"));
+        let path = dir.join(format!("{clean}.md"));
         let is_new = !path.exists();
         if is_new {
             let _ = fs::write(&path, format!("# {clean}\n\n"));
         }
         self.refresh_after_edit();
-        let lower = clean.to_lowercase();
-        if let Some(idx) = self.notes.iter().position(|n| n.name.to_lowercase() == lower) {
+        if let Some(idx) = self.notes.iter().position(|n| n.path == path) {
             self.list_state.select(Some(idx));
             self.reset_link_selection();
         }
