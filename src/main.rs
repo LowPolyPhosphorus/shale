@@ -1282,7 +1282,7 @@ impl App {
         }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Notes => Focus::Links,
                     Focus::Links => Focus::Notes,
@@ -2072,6 +2072,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  Backspace, h    back         l  forward"),
             Line::from("  PgUp / PgDn     scroll the preview (or mouse wheel)"),
             Line::from("  click           select a note or follow a link"),
+            Line::from("  Ctrl+D/Ctrl+U   half-page down/up"),
             Line::styled("Find", head),
             Line::from("  Ctrl+P          quick switcher"),
             Line::from("  /               search inside all notes"),
@@ -2295,6 +2296,15 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                         && key.code == KeyCode::Char('p')
                     {
                         app.open_switcher();
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('u'))
+                    {
+                        if !app.any_popup() {
+                            let rows = terminal.size()?.height;
+                            let half = (rows.saturating_sub(11) / 2).max(1) as i32;
+                            let delta = if key.code == KeyCode::Char('d') { half } else { -half };
+                            app.scroll_preview(delta);
+                        }
                     } else {
                         app.handle_key(key.code);
                     }
