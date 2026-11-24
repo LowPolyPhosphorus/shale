@@ -115,6 +115,7 @@ struct App {
     vault_items: Vec<PathBuf>,
     vault_state: ListState,
     help_scroll: u16,
+    keymap: std::collections::HashMap<char, char>,
 }
 
 impl App {
@@ -230,6 +231,7 @@ impl App {
             vault_items: Vec::new(),
             vault_state: ListState::default(),
             help_scroll: 0,
+            keymap: load_keymap(),
         };
         app.reset_link_selection();
         app
@@ -1348,6 +1350,10 @@ impl App {
             self.handle_recent_key(code);
             return;
         }
+        let code = match code {
+            KeyCode::Char(c) => KeyCode::Char(*self.keymap.get(&c).unwrap_or(&c)),
+            other => other,
+        };
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab | KeyCode::BackTab => {
@@ -1774,6 +1780,21 @@ fn known_vaults(current: &Path) -> Vec<PathBuf> {
         }
     }
     v
+}
+
+fn load_keymap() -> std::collections::HashMap<char, char> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(s) = read_config().get("remap") {
+        for pair in s.split(',') {
+            let mut it = pair.trim().chars();
+            if let (Some(from), Some(':'), Some(to), None) =
+                (it.next(), it.next(), it.next(), it.next())
+            {
+                map.insert(from, to);
+            }
+        }
+    }
+    map
 }
 
 fn config_path() -> Option<PathBuf> {
