@@ -114,6 +114,7 @@ struct App {
     vault_open: bool,
     vault_items: Vec<PathBuf>,
     vault_state: ListState,
+    help_scroll: u16,
 }
 
 impl App {
@@ -228,6 +229,7 @@ impl App {
             vault_open: false,
             vault_items: Vec::new(),
             vault_state: ListState::default(),
+            help_scroll: 0,
         };
         app.reset_link_selection();
         app
@@ -1306,7 +1308,17 @@ impl App {
             return;
         }
         if self.help_open {
-            self.help_open = false;
+            match code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(1),
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(1),
+                _ => self.help_open = false,
+            }
             return;
         }
         if self.confirm_delete {
@@ -1373,7 +1385,10 @@ impl App {
             KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('t') => self.open_tags(),
             KeyCode::Char('g') => self.open_graph(),
-            KeyCode::Char('?') => self.help_open = true,
+            KeyCode::Char('?') => {
+                self.help_scroll = 0;
+                self.help_open = true;
+            }
             KeyCode::Char('D') => {
                 if self.selected_note().is_some() {
                     self.confirm_delete = true;
@@ -1843,10 +1858,15 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let words = app
             .selected_note()
             .map_or(0, |n| n.content.split_whitespace().count());
+        let pane = match app.focus {
+            Focus::Notes => "Notes",
+            Focus::Links => "Links",
+        };
         Line::styled(
             format!(
-                " {} | {} notes | {} words ? help",
+                " {} | {} pane | {} notes | {} words ? help",
                 vault_name,
+                pane,
                 app.notes.len(),
                 words
             ),
@@ -2173,7 +2193,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  s               toggle sort (name / modified)"),
             Line::from("  Ctrl+g          switch vault"),
             Line::from(""),
-            Line::styled("Press any key to close", Style::new().fg(Color::DarkGray)),
+            Line::styled(
+                "j/k or PgUp/PgDn scroll, any other key closes", 
+                Style::new().fg(Color::DarkGray)
+            ),
         ];
         let area = frame.area();
         let w = (area.width * 7 / 10).max(50).min(area.width);
@@ -2185,8 +2208,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
             h,
         );
         frame.render_widget(Clear, popup);
+        let max_scroll = (lines.len() as u16).saturating_sub(h.saturating_sub(2));
+        app.help_scroll = app.help_scroll.min(max_scroll);
         frame.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(" Help ")),
+            Paragraph::new(lines)
+                .block(Block::bordered().title(" Help "))
+                .scroll((app.help_scroll, 0)),
             popup,
         );
     }
