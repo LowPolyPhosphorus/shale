@@ -111,6 +111,9 @@ struct App {
     outline_state: ListState,
     show_left: bool,
     show_links: bool,
+    vault_open: bool,
+    vault_items: Vec<PathBuf>,
+    vault_state: ListState,
 }
 
 impl App {
@@ -222,6 +225,9 @@ impl App {
             outline_state: ListState::default(),
             show_left: true,
             show_links: true,
+            vault_open: false,
+            vault_items: Vec::new(),
+            vault_state: ListState::default(),
         };
         app.reset_link_selection();
         app
@@ -705,6 +711,7 @@ impl App {
             || self.recent_open
             || self.health_open
             || self.outline_open
+            || self.vault_open
             || self.confirm_delete
     }
 
@@ -978,6 +985,38 @@ impl App {
                     self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
                 }
                 self.outline_open = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_vaults(&mut self) {
+        self.vault_items = known_vaults(&self.vault);
+        self.vault_state.select(Some(0));
+        self.vault_open = true;
+    }
+
+    fn handle_vault_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.vault_open = false,
+            KeyCode::Down | KeyCode::Char('j') => self.vault_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.vault_state.select_previous(),
+            KeyCode::Enter => {
+                let target = self
+                    .vault_state
+                    .selected()
+                    .and_then(|i| self.vault_items.get(i).cloned());
+                self.vault_open = false;
+                if let Some(p) = target {
+                    if p != self.vault {
+                        *self = App::new(&p);
+                        let name = p
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| p.display().to_string());
+                        self.status = format!("Opened vault {name}");
+                    }
+                }
             }
             _ => {}
         }
@@ -1283,6 +1322,10 @@ impl App {
         }
         if self.outline_open {
             self.handle_outline_key(code);
+            return;
+        }
+        if self.vault_open {
+            self.handle_vault_key(code);
             return;
         }
         if self.tasks_open {
@@ -1701,6 +1744,23 @@ fn vault_stamp(vault: &Path) -> (usize, u128) {
     (count, sum)
 }
 
+fn known_vaults(current: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = vec![current.to_path_buf()];
+    if let Some(s) = read_config().get("vaults") {
+        for p in s.split(';') {
+            let p = p.trim();
+            if p.is_empty() {
+                continue;
+            }
+            let pb = PathBuf::from(p);
+            if pb.is_dir() && !v.contains(&pb) {
+                v.push(pb);
+            }
+        }
+    }
+    v
+}
+
 fn config_path() -> Option<PathBuf> {
     let base = env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -2111,6 +2171,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  ?               this help"),
             Line::from("  q, Esc          quit"),
             Line::from("  s               toggle sort (name / modified)"),
+            Line::from("  Ctrl+g          switch vault"),
             Line::from(""),
             Line::styled("Press any key to close", Style::new().fg(Color::DarkGray)),
         ];
@@ -2248,6 +2309,29 @@ fn ui(frame: &mut Frame, app: &mut App) {
         frame.render_stateful_widget(list, popup, &mut app.outline_state);
     }
 
+    if app.vault_open {
+        let area = frame.area();
+        let w = area.width * 7 / 10;
+        let h = (app.vault_items.len() as u16 + 2)
+            .max(3)
+            .min(area.height.saturating_sub(4));
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .vault_items
+            .iter()
+            .map(|p| {
+                let mark = if *p == app.vault { "◆" } else { " " };
+                ListItem::new(format!("{mark} {}", p.display()))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(Block::bordered().title(" Vaults - Enter = open, Esc = close "))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.vault_state);
+    }
+
     if app.ac_open {
         let n = app.ac_matches.len() as u16;
         let h = (n + 2).min(preview_area.height);
@@ -2334,6 +2418,12 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                                 app.show_links = !app.show_links;
                             }
                         }
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('g')
+                    {
+                        if !app.any_popup() {
+                            app.open_vaults();
+                        }
                     } else {
                         app.handle_key(key.code);
                     }
@@ -2366,6 +2456,22 @@ fn main() -> io::Result<()> {
         config.insert("vault".to_string(), args[1].clone());
         let path = write_config(&config)?;
         println!("Saved vault path to {}", path.display());
+        return Ok(());
+    }
+
+    if args.len() == 2 && args[0] == "--add-vault" {
+        let existing = config.get("vaults").cloned().unwrap_or_default();
+        let mut list: Vec<String> = existing
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !list.contains(&args[1]) {
+            list.push(args[1].clone());
+        }
+        config.insert("vaults".to_string(), list.join(";"));
+        let path = write_config(&config)?;
+        println!("Saved vault list to {}", path.display());
         return Ok(());
     }
 
