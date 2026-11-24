@@ -43,6 +43,7 @@ struct Note {
     path: PathBuf,
     content: String,
     links: Vec<String>,
+    modified: std::time::SystemTime,
 }
 
 struct App {
@@ -104,6 +105,7 @@ struct App {
     health_open: bool,
     health_items: Vec<(usize, String)>,
     health_state: ListState,
+    sort_modified: bool,
 }
 
 impl App {
@@ -127,6 +129,9 @@ impl App {
                         .file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default(),
+                    modified: fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH),
                     path,
                     content,
                     links,
@@ -193,6 +198,7 @@ impl App {
             recent_items: Vec::new(),
             recent_open: false,
             recent_state: ListState::default(),
+            sort_modified: bool,
             health_open: false,
             health_items: Vec::new(),
             health_state: ListState::default(),
@@ -200,6 +206,7 @@ impl App {
             dwell_since: Instant::now(),
             stamp: vault_stamp(vault),
             last_check: Instant::now(),
+            sort_modified: false,
         };
         app.reset_link_selection();
         app
@@ -233,6 +240,9 @@ impl App {
         let fresh = App::new(&self.vault);
         self.notes = fresh.notes;
         self.stamp = fresh.stamp;
+        if self.sort_modified {
+            self.notes.sort_by(|a, b| b.modified.cmp(&a.modified));
+        }
         let idx = keep
             .and_then(|p| self.notes.iter().position(|n| n.path == p))
             .or(if self.notes.is_empty() { None } else { Some(0) });
@@ -1245,6 +1255,15 @@ impl App {
             KeyCode::Char('T') => self.open_tasks(),
             KeyCode::Char('o') => self.open_recent(),
             KeyCode::Char('u') => self.open_health(),
+            KeyCode::Char('s') => {
+                self.sort_modified = !self.sort_modified;
+                self.refresh_after_edit();
+                self.status = if self.sort_modified {
+                    "Sorted by last modified".to_string()
+                } else {
+                    "Sorted by name".to_string()
+                };
+            }
             _ => {}
         }
     }
@@ -1664,8 +1683,16 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "vault".to_string());
+        let words = app
+            .selected_note()
+            .map_or(0, |n| n.content.split_whitespace().count());
         Line::styled(
-            format!(" {} | {} notes | ? help ", vault_name, app.notes.len()),
+            format!(
+                " {} | {} notes | {} words ? help",
+                vault_name,
+                app.notes.len(),
+                words
+            ),
             Style::new().fg(Color::DarkGray),
         )
     };
@@ -1983,6 +2010,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  r               reload the vault from disk"),
             Line::from("  ?               this help"),
             Line::from("  q, Esc          quit"),
+            Line::from("  s               toggle sort (name / modified)"),
             Line::from(""),
             Line::styled("Press any key to close", Style::new().fg(Color::DarkGray)),
         ];
