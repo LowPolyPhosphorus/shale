@@ -105,6 +105,9 @@ struct App {
     health_open: bool,
     health_items: Vec<(usize, String)>,
     health_state: ListState,
+    trash_open: bool,
+    trash_items: Vec<(PathBuf, String)>,
+    trash_state: ListState,
     sort_modified: bool,
     outline_open: bool,
     outline_items: Vec<(usize, usize, String)>,
@@ -120,7 +123,7 @@ struct App {
 
 impl App {
     fn new(vault: &Path) -> Self {
-        let link_re = Regex::new(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]").unwrap();
+        let link_re = Regex::new(r"\[\[([^\]|]+)(?:[|][^\]]*)?\]\]").unwrap();
 
         let mut notes: Vec<Note> = WalkDir::new(vault)
             .into_iter()
@@ -214,6 +217,9 @@ impl App {
             recent_items: Vec::new(),
             recent_open: false,
             recent_state: ListState::default(),
+            trash_open: false,
+            trash_items: Vec::new(),
+            trash_state: ListState::default(),
             health_open: false,
             health_items: Vec::new(),
             health_state: ListState::default(),
@@ -716,6 +722,7 @@ impl App {
             || self.outline_open
             || self.vault_open
             || self.confirm_delete
+            || self.confirm_delete
     }
 
     fn tick(&mut self) {
@@ -742,6 +749,56 @@ impl App {
                     self.status = "Vault changed on disk - reloaded".to_string();
                 }
             }
+        }
+    }
+
+    fn open_trash(&mut self) {
+        let mut items: Vec<(PathBuf, String)> = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.vault.join(".trash")) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map_or(false, |x| x == "md") {
+                    let name = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    items.push((p, name));
+                }
+            }
+        }
+        items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        self.trash_state.select(if items.is_empty() { None } else { Some(0) });
+        self.trash_items = items;
+        self.trash_open = true;
+    }
+
+    fn restore_trashed(&mut self) {
+        let Some(i) = self.trash_state.selected() else { return };
+        let Some((from, name)) = self.trash_items.get(i).cloned() else { return };
+        let to = self.vault.join(format!("{name}.md"));
+        if to.exists() {
+            self.status = format!("'{name}' already exists in vault");
+            return;
+        }
+        match fs::rename(&from, &to) {
+            Ok(_) => {
+                self.status = format!("Restored '{name}'");
+                self.trash_items.remove(i);
+                self.trash_state.select(if self.trash_items.is_empty() {
+                    None
+                } else {
+                    Some(i.min(self.trash_items.len() - 1))
+                });
+                self.refresh_after_edit();
+            }
+            Err(e) => self.status = format!("Restor failted: {e}"),
+        }
+    }
+    
+    fn handle_trash_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.trash_open = false,
+            KeyCode::Down | KeyCode::Char('j') => self.trash_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.trash_state.select_previous(),
+            KeyCode::Enter => self.restore_trashed(),
+            _ => {}
         }
     }
 
@@ -1207,17 +1264,30 @@ impl App {
     fn follow_link(&mut self) {
         let Some(note) = self.selected_note() else { return };
         let Some(i) = self.link_state.selected() else { return };
-        let Some(target) = note.links.get(i) else { return };
+        let Some(target) = note.links.get(i).cloned() else { return };
         let original = link_original(&note.content, &target).unwrap_or_else(|| target.clone());
         if let Some(idx) = resolve_link(&self.notes, &target) {
             self.jump_to(idx);
+            if let Some((_, h)) = target.split_once('#') {
+                let wanted = h.trim().to_lowercase();
+                if let Some(ln) = heading_line(&self.notes[idx].content, &wanted) {
+                    let prefix: String = self.notes[idx]
+                        .content
+                        .lines()
+                        .take(ln)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
+                }
+            }
             return;
         }
         if let Some(cur) = self.list_state.selected() {
             self.history.push(cur);
         }
         self.forward.clear();
-        let clean = original.trim().trim_start_matches("./").replace('\\', "/");
+        let clean = original.split('#').next().unwrap_or(&original)
+            .trim().trim_start_matches("./").replace('\\', "/");
         let (dir, name) = match clean.rsplit_once('/') {
             Some((parent, leaf)) => (self.vault.join(parent), leaf.to_string()),
             None => (self.current_dir(), clean.clone()),
@@ -1355,6 +1425,10 @@ impl App {
             self.handle_recent_key(code);
             return;
         }
+        if self.trash_open {
+            self.handle_trash_key(code);
+            return;
+        }
         let code = match code {
             KeyCode::Char(c) => KeyCode::Char(*self.keymap.get(&c).unwrap_or(&c)),
             other => other,
@@ -1415,6 +1489,7 @@ impl App {
             KeyCode::Char('T') => self.open_tasks(),
             KeyCode::Char('o') => self.open_recent(),
             KeyCode::Char('u') => self.open_health(),
+            KeyCode::Char('X') => self.open_trash(),
             KeyCode::Char('s') => {
                 self.sort_modified = !self.sort_modified;
                 self.refresh_after_edit();
@@ -1666,8 +1741,42 @@ fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+fn heading_line(content: &str, wanted: &str) -> Option<usize> {
+    let mut in_code = false;
+    let mut in_front = false;
+    for (ln, raw) in content.lines().enumerate() {
+        if ln == 0 && raw.trim() == "---" {
+            in_front = true;
+            continue;
+        }
+        if in_front {
+            if raw.trim() == "---" {
+                in_front = false;
+            }
+            continue;
+        }
+        if raw.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let trimmed = raw.trim_start();
+        let level = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&level)
+            && trimmed.chars().nth(level) == Some(' ')
+            && trimmed[level + 1..].trim().to_lowercase() == wanted
+        {
+            return Some(ln);
+        }
+    }
+    None
+}
+
 fn resolve_link(notes: &[Note], target: &str) -> Option<usize> {
-    let t = target.trim().trim_start_matches("./").replace('\\', "/").to_lowercase();
+    let t = target.split('#').next().unwrap_or(target)
+        .trim().trim_start_matches("./").replace('\\', "/").to_lowercase();
     if let Some(i) = notes.iter().position(|n| n.rel.to_lowercase() == t) {
         return Some(i);
     }
@@ -1678,7 +1787,7 @@ fn resolve_link(notes: &[Note], target: &str) -> Option<usize> {
 }
 
 fn parse_links(content: &str) -> Vec<String> {
-    let re = Regex::new(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]").unwrap();
+    let re = Regex::new(r"\[\[([^\]|]+)(?:[|][^\]]*)?\]\]").unwrap();
     let links: Vec<String> = re
         .captures_iter(content)
         .map(|c| c[1].trim().to_lowercase())
@@ -1751,7 +1860,7 @@ fn parse_task(trimmed: &str) -> Option<(bool, &str)> {
 }
 
 fn link_original(content: &str, lower: &str) -> Option<String> {
-    let re = Regex::new(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]").unwrap();
+    let re = Regex::new(r"\[\[([^\]|]+)(?:[|][^\]]*)?\]\]").unwrap();
     let found = re
         .captures_iter(content)
         .map(|c| c[1].trim().to_string())
@@ -2310,6 +2419,26 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, popup, &mut app.recent_state);
+    }
+
+    if app.trash_open {
+        let area = frame.area();
+        let w = area.width * 6 /10;
+        let h = (app.trash_items.len() as u16 + 2)
+            .max(3)
+            .min(area.height.saturating_sub(4));
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .trash_items
+            .iter()
+            .map(|(_, name)| ListItem::new(name.clone()))
+            .collect();
+        let list = List::new(items)
+            .block(Block::bordered().title(" Trash - Enter = restore, Esc = close "))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.trash_state);
     }
 
     if app.health_open {
