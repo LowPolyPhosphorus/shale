@@ -106,6 +106,9 @@ struct App {
     health_items: Vec<(usize, String)>,
     health_state: ListState,
     sort_modified: bool,
+    outline_open: bool,
+    outline_items: Vec<(usize, usize, String)>,
+    outline_state: ListState,
 }
 
 impl App {
@@ -198,7 +201,6 @@ impl App {
             recent_items: Vec::new(),
             recent_open: false,
             recent_state: ListState::default(),
-            sort_modified: bool,
             health_open: false,
             health_items: Vec::new(),
             health_state: ListState::default(),
@@ -207,6 +209,9 @@ impl App {
             stamp: vault_stamp(vault),
             last_check: Instant::now(),
             sort_modified: false,
+            outline_open: false,
+            outline_items: Vec::new(),
+            outline_state: ListState::default(),
         };
         app.reset_link_selection();
         app
@@ -679,6 +684,7 @@ impl App {
             || self.tasks_open
             || self.recent_open
             || self.health_open
+            || self.outline_open
             || self.confirm_delete
     }
 
@@ -891,6 +897,67 @@ impl App {
                     self.jump_to(idx);
                 }
                 self.tasks_open = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_outline(&mut self) {
+        let Some(n) = self.selected_note() else { return };
+        let mut items: Vec<(usize, usize, String)> = Vec::new();
+        let mut in_code = false;
+        let mut in_front = false;
+        for (ln, raw) in n.content.lines().enumerate() {
+            if ln == 0 && raw.trim() == "---" {
+                in_front = true;
+                continue;
+            }
+            if in_front {
+                if raw.trim() == "---" {
+                    in_front = false;
+                }
+                continue;
+            }
+            if raw.trim_start().starts_with("```"){
+                in_code = !in_code;
+                continue;
+            }
+            if in_code {
+                continue;
+            }
+            let trimmed = raw.trim_start();
+            let level = trimmed.chars().take_while(|&c| c == '#').count();
+            if (1..=6).contains(&level) && trimmed.chars().nth(level) == Some(' ') {
+                items.push((level, ln, trimmed[level + 1..].trim().to_string()));
+            }
+        }
+        self.outline_state
+            .select(if items.is_empty() { None } else { Some(0) });
+        self.outline_items = items;
+        self.outline_open = true;
+    }
+
+    fn handle_outline_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.outline_open = false,
+            KeyCode::Down | KeyCode::Char('j') => self.outline_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.outline_state.select_previous(),
+            KeyCode::Enter => {
+                let target = self
+                    .outline_state
+                    .selected()
+                    .and_then(|i| self.outline_items.get(i))
+                    .map(|(_, ln, _)| *ln);
+                if let (Some(ln), Some(idx)) = (target, self.list_state.selected()) {
+                    let prefix: String = self.notes[idx]
+                        .content
+                        .lines()
+                        .take(ln)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
+                }
+                self.outline_open = false;
             }
             _ => {}
         }
@@ -1194,6 +1261,10 @@ impl App {
             self.handle_health_key(code);
             return;
         }
+        if self.outline_open {
+            self.handle_outline_key(code);
+            return;
+        }
         if self.tasks_open {
             self.handle_tasks_key(code);
             return;
@@ -1264,6 +1335,7 @@ impl App {
                     "Sorted by name".to_string()
                 };
             }
+            KeyCode::Char('O') => self.open_outline(),
             _ => {}
         }
     }
@@ -1999,6 +2071,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  t               browse tags"),
             Line::from("  g               graph view"),
             Line::from("  u               unresolved links and orphans"),
+            Line::from("  O               outline (headings of this note)"),
             Line::styled("Write", head),
             Line::from("  e               edit in the app (Ctrl+S save, Esc exit)"),
             Line::from("  E               edit in an external editor"),
@@ -2114,6 +2187,38 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, popup, &mut app.health_state);
+    }
+
+    if app.outline_open {
+        let area = frame.area();
+        let w = area.width * 6 / 10;
+        let h = area.height.saturating_sub(4).min(24);
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + 2, w, h);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .outline_items
+            .iter()
+            .map(|(level, _, text)| {
+                let color = match level {
+                    1 => Color::Cyan,
+                    2 => Color::Blue,
+                    _ => Color::Magenta,
+                };
+                ListItem::new(Span::styled(
+                    format!("{}{}", " ".repeat(level - 1), text),
+                    Style::new().fg(color),
+                ))
+            })
+            .collect();
+        let title = format!(
+            " Outline ({}) - Enter = jump, Esc = close ",
+            app.outline_items.len()
+        );
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ");
+        frame.render_stateful_widget(list, popup, &mut app.outline_state);
     }
 
     if app.ac_open {
