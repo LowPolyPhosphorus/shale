@@ -242,9 +242,7 @@ impl App {
     }
 
     fn note_exists(&self, lowercase_name: &str) -> bool {
-        self.notes
-            .iter()
-            .any(|n| n.name.to_lowercase() == lowercase_name)
+        resolve_link(&self.notes, lowercase_name).is_some()
     }
 
     fn reset_link_selection(&mut self) {
@@ -321,6 +319,7 @@ impl App {
         if clean.is_empty() {
             return ;
         }
+        let _ = fs::create_dir_all(dir);
         let path = dir.join(format!("{clean}.md"));
         let is_new = !path.exists();
         if is_new {
@@ -788,11 +787,10 @@ impl App {
             return;
         }
 
-        let old_lower = old_name.to_lowercase();
         let to_fix: Vec<PathBuf> = self
             .notes
             .iter()
-            .filter(|n| n.links.contains(&old_lower))
+            .filter(|n| n.links.iter().any(|l| resolve_link(&self.notes, l) == Some(idx)))
             .map(|n| {
                 if n.path == old_path {
                     new_path.clone()
@@ -807,7 +805,7 @@ impl App {
             return;
         }
 
-        let pattern = format!(r"\[\[\s*{}\s*([|#]|\]\])", regex::escape(&old_name));
+        let pattern = format!(r"\[\[(\s*[^\]|#]*/)?\s*{}\s*([|#]|\]\])", regex::escape(&old_name));
         let re = regex::RegexBuilder::new(&pattern)
             .case_insensitive(true)
             .build()
@@ -817,6 +815,7 @@ impl App {
             if let Ok(text) = fs::read_to_string(p) {
                 let new_text = re
                     .replace_all(&text, |caps: &regex::Captures| {
+                        let prefix = caps.get(1).map_or("", |m| m.as_str());
                         format!("[[{}{}", clean, &caps[1])
                     })
                     .into_owned();
@@ -1044,15 +1043,19 @@ impl App {
 
     fn open_health(&mut self) {
         use std::collections::HashSet;
-        let names: HashSet<String> =
-            self.notes.iter().map(|n| n.name.to_lowercase()).collect();
+        let mut names: HashSet<String> = HashSet::new();
+        for in &self.notes {
+            names.insert(n.name.to_lowercase());
+            names.insert(n.rel.to_lowercase());
+        }
         
         let mut linked_to: HashSet<String> = HashSet::new();
-        for n in &self.notes {
-            let me = n.name.to_lowercase();
+        for (i, n) in self.notes.iter().enumerate() {
             for l in &n.links {
-                if *l != me {
-                    linked_to.insert(l.clone());
+                if let Some(t) = resolve_link(&self.notes, l) {
+                    if t != i {
+                        linked_to.insert(t);
+                    }
                 }
             }
         }
@@ -1069,9 +1072,8 @@ impl App {
         }
 
         for (i, n) in self.notes.iter().enumerate() {
-            let me = n.name.to_lowercase();
-            let has_out = n.links.iter().any(|l| *l != me && names.contains(l));
-            let has_in = linked_to.contains(&me);
+            let has_out = n.links.iter().any(|l| resolve_link(&self.notes, l).map_or(false, |t| t != i));
+            let has_in = linked_to.contains(&i);
             if !has_out && !has_in {
                 items.push((i, format!("orphan {}", n.name)));
             }
@@ -1207,20 +1209,20 @@ impl App {
         let Some(i) = self.link_state.selected() else { return };
         let Some(target) = note.links.get(i) else { return };
         let original = link_original(&note.content, &target).unwrap_or_else(|| target.clone());
-        let found = self
-            .notes
-            .iter()
-            .position(|n| n.name.to_lowercase() == *target);
-        match found {
-            Some(idx) => self.jump_to(idx),
-            None => {
-                if let Some(cur) = self.list_state.selected() {
-                    self.history.push(cur);
-                }
-                self.forward.clear();
-                self.create_note(&original);
-            }
+        if let Some(idx) = resolve_link(&self.notes, &target) {
+            self.jump_to(idx);
+            return;
         }
+        if let Some(cur) = self.list_state.selected() {
+            self.history.push(cur);
+        }
+        self.forward.clear();
+        let clean = original.trim().trim_start_matches("./").replace('\\', "/");
+        let (dir, name) = match clean.rsplit_once('/') {
+            Some((parent, leaf)) => (self.vault.join(parent), leaf.to_string()),
+            None => (self.current_dir(), clean.clone()),
+        };
+        self.create_note_in(&dir, &name);
     }
 
     fn go_back(&mut self) {
@@ -1278,15 +1280,18 @@ impl App {
     }
 
     fn backlinks(&self) -> Vec<&Note> {
-        let Some(sel) = self.selected_note() else {
+        let Some(sel) = self.list_state.selected() else {
             return Vec::new();
         };
-        let target = sel.name.to_lowercase();
         self.notes
             .iter()
-            .filter(|n| n.path != sel.path && n.links.contains(&target))
+            .enumerate()
+            .filter(|(i, n)| {
+                *i != sel && n.links.iter().any(|l| resolve_link(&self.notes, l) == Some(sel))
+            })
+            .map(|(_, n)| n)
             .collect()
-    } 
+    }
 
     fn handle_key(&mut self, code: KeyCode) {
         if self.switcher_open {
@@ -1659,6 +1664,17 @@ fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(inline_spans(raw, Style::new())));
     }
     lines
+}
+
+fn resolve_link(notes: &[Note], target: &str) -> Option<usize> {
+    let t = target.trim().trim_start_matches("./").replace('\\', "/").to_lowercase();
+    if let Some(i) = notes.iter().position(|n| n.rel.to_lowercase() == t) {
+        return Some(i);
+    }
+    if t.contains('/') {
+        return notes.iter().position(|n| n.rel.to_lowercase().ends_with(&format!("/{t}")));
+    }
+    notes.iter().position(|n| n.name.to_lowercase() == t)
 }
 
 fn parse_links(content: &str) -> Vec<String> {
