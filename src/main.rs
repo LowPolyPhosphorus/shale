@@ -1044,12 +1044,12 @@ impl App {
     fn open_health(&mut self) {
         use std::collections::HashSet;
         let mut names: HashSet<String> = HashSet::new();
-        for in &self.notes {
+        for (i, n) in self.notes.iter().enumerate() {
             names.insert(n.name.to_lowercase());
             names.insert(n.rel.to_lowercase());
         }
         
-        let mut linked_to: HashSet<String> = HashSet::new();
+        let mut linked_to: HashSet<usize> = HashSet::new();
         for (i, n) in self.notes.iter().enumerate() {
             for l in &n.links {
                 if let Some(t) = resolve_link(&self.notes, l) {
