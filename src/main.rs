@@ -121,7 +121,7 @@ struct App {
     vault_items: Vec<PathBuf>,
     vault_state: ListState,
     help_scroll: u16,
-    keymap: std::collections::HashMap<char, char>,
+    keymap: std::collections::HashMap<char, String>,
 }
 
 impl App {
@@ -355,7 +355,34 @@ impl App {
 
     fn open_daily(&mut self) {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        self.create_note(&today);
+        let vault = self.vault.clone();
+        let path = vault.join(format!("{today}.md"));
+        let existed = path.exists();
+        self.create_note_in(&vault, &today);
+        if !existed {
+            let cfg = read_config();
+            let cfg_path = config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let wanted = cfg.get("daily_template").cloned().unwrap_or_default();
+            let template = cfg
+                .get("daily_template")
+                .and_then(|p| fs::read_to_string(p).ok());
+            if let Some(mut text) = template { 
+                text = text.replace("{date}", &today);
+                text = text.replace("{title}", &today);
+                text = text.replace(
+                    "{time}",
+                    &chrono::Local::now().format("%H:%M").to_string(),
+                );
+                if fs::write(&path, text).is_ok() {
+                    self.refresh_after_edit();
+                    self.status = "Daily note template applied".to_string();
+                }
+            } else {
+                self.status = format!("No template: cfg={cfg_path} key={wanted}");
+            }
+        }
     }
 
     fn start_editing(&mut self) {
@@ -1456,7 +1483,11 @@ impl App {
             return;
         }
         let code = match code {
-            KeyCode::Char(c) => KeyCode::Char(*self.keymap.get(&c).unwrap_or(&c)),
+            KeyCode::Char(c) => self
+                .keymap
+                .get(&c)
+                .and_then(|a| action_to_code(a))
+                .unwrap_or(KeyCode::Char(c)),
             other => other,
         };
         match code {
@@ -1519,6 +1550,7 @@ impl App {
             KeyCode::Char('o') => self.open_recent(),
             KeyCode::Char('u') => self.open_health(),
             KeyCode::Char('X') => self.open_trash(),
+            KeyCode::Char('G') => self.open_vaults(),
             KeyCode::Char('s') => {
                 self.sort_modified = !self.sort_modified;
                 self.refresh_after_edit();
@@ -1974,19 +2006,49 @@ fn known_vaults(current: &Path) -> Vec<PathBuf> {
     v
 }
 
-fn load_keymap() -> std::collections::HashMap<char, char> {
+fn load_keymap() -> std::collections::HashMap<char, String> {
     let mut map = std::collections::HashMap::new();
-    if let Some(s) = read_config().get("remap") {
-        for pair in s.split(',') {
-            let mut it = pair.trim().chars();
-            if let (Some(from), Some(':'), Some(to), None) =
-                (it.next(), it.next(), it.next(), it.next())
-            {
-                map.insert(from, to);
+    let cfg = read_config();
+    for key in ["remap", "bind"] {
+        if let Some(s) = cfg.get(key) {
+            for pair in s.split(',') {
+                let parts: Vec<&str> = pair.trim().split(':').collect();
+                if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                    if let Some(from) = parts[0].chars().next() {
+                        map.insert(from, parts[1].to_string());
+                    }
+                }
             }
         }
     }
     map
+}
+
+fn action_to_code(action: &str) -> Option<KeyCode> {
+    let key = match action.to_lowercase().as_str() {
+        "search" => '/',
+        "tags" => 't',
+        "graph" => 'g',
+        "tasks" => 'T',
+        "recent" => 'o',
+        "health" => 'u',
+        "outline" => 'O',
+        "daily" => 'd',
+        "new" => 'n',
+        "rename" => 'R',
+        "trash" => 'X',
+        "vaults" => 'G',
+        "help" => '?',
+        "back" => 'h',
+        "forward" => 'l',
+        "reload" => 'r',
+        "edit" => 'e',
+        "external" => 'E',
+        "delete" => 'D',
+        "sort" => 's',
+        other => return other.chars().next().map(KeyCode::Char),
+    };
+    Some(KeyCode::Char(key))
 }
 
 fn config_path() -> Option<PathBuf> {
