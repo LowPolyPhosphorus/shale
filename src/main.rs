@@ -541,11 +541,11 @@ impl App {
                     .notes
                     .iter()
                     .enumerate()
-                    .filter(|(_, n)| fuzzy(&q, &n.name))
+                    .filter(|(_, n)| fuzzy(&q, &n.rel) || fuzzy(&q, &n.name))
                     .map(|(i, _)| i)
                     .collect();
                 m.sort_by_key(|&i| {
-                    let n = self.notes[i].name.to_lowercase();
+                    let n = self.notes[i].rel.to_lowercase();
                     (!n.starts_with(&ql), n.len())
                 });
                 m.truncate(8);
@@ -567,7 +567,7 @@ impl App {
             self.ac_open = false;
             return;
         };
-        let name = self.notes[idx].name.clone();
+        let name = self.notes[idx].rel.clone();
         let qlen = self.ac_query.chars().count();
         if let Some(ta) = self.editor.as_mut() {
             for _ in 0..qlen {
@@ -2356,7 +2356,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let items: Vec<ListItem> = app
             .matches
             .iter()
-            .map(|&i| ListItem::new(app.notes[i].name.as_str()))
+            .map(|&i| ListItem::new(app.notes[i].rel.as_str()))
             .collect();
         let results = List::new(items)
             .block(Block::bordered())
