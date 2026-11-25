@@ -1145,6 +1145,23 @@ impl App {
             }
         }
 
+        let wiki_re = Regex::new(r"\[\[[^\]]*\]\]").unwrap();
+        for (i, n) in self.notes.iter().enumerate() {
+            let plain = wiki_re.replace_all(&n.content, "").to_string();
+            for (j, target) in self.notes.iter().enumerate() {
+                if i == j || target.name.len() < 3 {
+                    continue;
+                }
+                let re = regex::RegexBuilder::new(&format!(r"\b{}\b", regex::escape(&target.name)))
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap();
+                if re.is_match(&plain) {
+                    items.push((i, format!("unlinked '{}' in {}", target.name, n.name)));
+                }
+            }
+        }
+
         self.health_state
             .select(if items.is_empty() { None } else { Some(0) });
         self.health_items = items;
@@ -2522,7 +2539,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .health_items
             .iter()
             .map(|(_, text)| {
-                let color = if text.starts_with("missing") {
+                let color = if text.starts_with("missing") || text.starts_with("unlinked") {
                     Color::Yellow
                 } else {
                     Color::DarkGray
@@ -2531,7 +2548,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             })
             .collect();
         let title = format!(
-            " Unresolved links and orphans ({}) - Enter = open, Esc = close ",
+            " Unresolved links, orphans and unlinked mentions ({}) - Enter = open, Esc = close ",
             app.health_items.len()
         );
         let list = List::new(items)
