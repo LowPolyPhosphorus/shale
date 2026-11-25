@@ -1801,6 +1801,44 @@ fn parse_tags(content: &str) -> Vec<String> {
         .captures_iter(content)
         .map(|c| c[1].to_lowercase())
         .collect();
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            let front = &rest[..end];
+            let mut in_tags = false;
+            for line in front.lines() {
+                let t = line.trim();
+                if let Some(raw) = t.strip_prefix("tags:") {
+                    in_tags = true;
+                    let items = raw.trim()
+                        .trim_start_matches('[')
+                        .trim_end_matches(']');
+                    for x in items.split(',') {
+                        let tag = x.trim()
+                            .trim_matches('\'') 
+                            .trim_matches('"')
+                            .trim_start_matches('#');
+                        if !tag.is_empty() {
+                            tags.push(tag.to_lowercase());
+                        }
+                    }
+                    continue;
+                }
+                if in_tags {
+                    if let Some(x) = t.strip_prefix("- ") {
+                        let tag = x.trim()
+                            .trim_matches('\'')
+                            .trim_matches('"')
+                            .trim_start_matches('#');
+                        if !tag.is_empty() {
+                            tags.push(tag.to_lowercase());
+                        }
+                    } else if !t.is_empty() {
+                        in_tags = false;
+                    }
+                }
+            }
+        }
+    }
     tags.sort();
     tags.dedup();
     tags
