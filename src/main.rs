@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 use std::{env, fs, io, path::{Path, PathBuf}};
 
+use ratatui::crossterm::style::style;
 use ratatui::{
     crossterm::{
         event::{
@@ -28,6 +29,7 @@ use std::process::Command;
 enum Focus {
     Notes,
     Links,
+    Preview,
 }
 
 struct TaskItem {
@@ -53,6 +55,7 @@ struct App {
     focus: Focus,
     should_quit: bool,
     preview_scroll: u16,
+    cursor_row: usize,
     history: Vec<usize>,
     forward: Vec<usize>,
     notes_area: Rect,
@@ -172,6 +175,7 @@ impl App {
             focus: Focus::Notes,
             should_quit: false,
             preview_scroll: 0,
+            cursor_row: 0,
             history: Vec::new(),
             forward: Vec::new(),
             notes_area: Rect::default(),
@@ -255,6 +259,11 @@ impl App {
         let has_links = self.selected_note().map_or(false, |n| !n.links.is_empty());
         self.link_state.select(if has_links { Some(0) } else { None });
         self.preview_scroll = 0;
+        self.cursor_row = 0;
+    }
+
+    fn move_view_cursor(&mut self, delta: i32) {
+        self.cursor_row = (self.cursor_row as i32 + delta).max(0) as usize;
     }
 
     fn scroll_preview(&mut self, delta: i32) {
@@ -1438,16 +1447,19 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Notes => Focus::Links,
-                    Focus::Links => Focus::Notes,
+                    Focus::Links => Focus::Preview,
+                    Focus::Preview => Focus::Notes,
                 };
             }
             KeyCode::Down | KeyCode::Char('j') => match self.focus {
                 Focus::Notes => self.move_note_selection(1),
                 Focus::Links => self.link_state.select_next(),
-            },
+                Focus::Preview => self.move_view_cursor(1),
+            }, 
             KeyCode::Up | KeyCode::Char('k') => match self.focus {
                 Focus::Notes => self.move_note_selection(-1),
                 Focus::Links => self.link_state.select_previous(),
+                Focus::Preview => self.move_view_cursor(-1),
             },
             KeyCode::Enter => {
                 if self.focus == Focus::Links {
@@ -2045,6 +2057,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let pane = match app.focus {
             Focus::Notes => "Notes",
             Focus::Links => "Links",
+            Focus::Preview =>  "Preview",
         };
         Line::styled(
             format!(
@@ -2104,11 +2117,31 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Some(n) => (format!(" {} ", n.name), n.content.clone()),
             None => (" Preview ".to_string(), "No notes found.".to_string()),
         };
-        let rendered =render_markdown(&content, preview_area.width.saturating_sub(2) as usize);
+        let mut rendered =render_markdown(&content, preview_area.width.saturating_sub(2) as usize);
         let max_scroll = rendered.len().saturating_sub(1) as u16;
         app.preview_scroll = app.preview_scroll.min(max_scroll);
+        app.cursor_row = app.cursor_row.min(rendered.len().saturating_sub(1));
+        let visible_rows = preview_area.height.saturating_sub(2) as usize;
+        if app.cursor_row >= app.preview_scroll as usize + visible_rows {
+            app.preview_scroll = (app.cursor_row + 1 - visible_rows) as u16;
+        } else if app.cursor_row < app.preview_scroll as usize {
+            app.preview_scroll = app.cursor_row as u16;
+        }
+        if let Some(line) = rendered.get_mut(app.cursor_row) {
+            for span in &mut line.spans {
+                span.style = span.style.add_modifier(Modifier::REVERSED);
+            }
+        }
         let preview = Paragraph::new(rendered)
-            .block(Block::bordered().title(title))
+            .block(
+                Block::bordered().title(title).border_style(
+                    if app.focus == Focus::Preview {
+                        Style::new().fg(Color::Yellow)
+                    } else {
+                        Style::new()
+                    },
+                ),
+            )
             .wrap(Wrap { trim: false })
             .scroll((app.preview_scroll, 0));
         frame.render_widget(preview, preview_area);
