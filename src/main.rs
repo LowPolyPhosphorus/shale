@@ -2342,7 +2342,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let backs: Vec<ListItem> = app
         .backlinks()
         .iter()
-        .map(|n| ListItem::new(n.name.clone()))
+        .map(|n| ListItem::new(n.rel.clone()))
         .collect();
     let back_title = format!(" Backlinks ({}) ", backs.len());
     frame.render_widget(
