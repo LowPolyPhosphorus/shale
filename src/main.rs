@@ -899,6 +899,19 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.trash_state.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.trash_state.select_previous(),
             KeyCode::Enter => self.restore_trashed(),
+            KeyCode::Char('D') => {
+                let Some(i) = self.trash_state.selected() else { return };
+                let Some((path, name)) = self.trash_items.get(i).cloned() else { return };
+                if fs::remove_file(&path).is_ok() {
+                    self.trash_items.remove(i);
+                    self.trash_state.select(if self.trash_items.is_empty(){
+                        None
+                    } else {
+                        Some(i.min(self.trash_items.len() - 1))
+                    });
+                    self.status = format!("Permanently deleted '{name}'");
+                }
+            }
             _ => {}
         }
     }
