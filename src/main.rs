@@ -2645,7 +2645,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let items: Vec<ListItem> = app
             .recent_items
             .iter()
-            .map(|&i| ListItem::new(app.notes[i].name.as_str()))
+            .map(|&i| ListItem::new(app.notes[i].rel.as_str()))
             .collect();
         let list = List::new(items)
             .block(Block::bordered().title(" Recent - Enter = open, Esc = close "))
