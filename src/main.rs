@@ -1743,6 +1743,41 @@ fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
     spans
 }
 
+fn expand_embeds(content: &str, notes: &[Note], depth: u8) -> String {
+    if depth > 3 {
+        return content.to_string();
+    }
+    let re = Regex::new(r"!\[\[([^\]]+)\]\]").unwrap();
+    re.replace_all(content, |caps: &regex::Captures| {
+        let raw = caps[1].trim();
+        let (target, heading) = raw.split_once('#').unwrap_or((raw, ""));
+        let Some(idx) = resolve_link(notes, target) else {
+            return format!("Missing embed: [[{raw}]]");
+        };
+        let text = notes[idx].content.as_str();
+        if heading.is_empty() {
+            return expand_embeds(text, notes, depth + 1);
+        }
+        let wanted = heading.trim().to_lowercase();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some(start) = heading_line(text, &wanted) else {
+            return format!("Heading not found: [[{raw}]]");
+        };
+        let level = lines[start].chars().take_while(|&c| c == '#').count();
+        let mut out = vec![lines[start].to_string()];
+        for line in lines.iter().skip(start + 1) {
+            let t = line.trim_start();
+            let l = t.chars().take_while(|&c| c == '#').count();
+            if (1..=6).contains(&l) && l <= level && t.chars().nth(l) == Some(' ') {
+                break;
+            }
+            out.push((*line).to_string());
+        }
+        expand_embeds(&out.join("\n"), notes, depth + 1)
+    })
+    .into_owned()
+}
+
 fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
     let dim = Style::new().fg(Color::DarkGray);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -2279,7 +2314,8 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Some(n) => (format!(" {} ", n.name), n.content.clone()),
             None => (" Preview ".to_string(), "No notes found.".to_string()),
         };
-        let mut rendered =render_markdown(&content, preview_area.width.saturating_sub(2) as usize);
+        let expanded = expand_embeds(&content, &app.notes, 0);
+        let mut rendered =render_markdown(&expanded, preview_area.width.saturating_sub(2) as usize);
         let max_scroll = rendered.len().saturating_sub(1) as u16;
         app.preview_scroll = app.preview_scroll.min(max_scroll);
         app.cursor_row = app.cursor_row.min(rendered.len().saturating_sub(1));
