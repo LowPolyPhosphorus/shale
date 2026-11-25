@@ -67,6 +67,7 @@ struct App {
     history: Vec<usize>,
     forward: Vec<usize>,
     notes_area: Rect,
+    preview_width: usize,
     links_rect: Rect,
     back_rect: Rect,
     vault: PathBuf,
@@ -189,6 +190,7 @@ impl App {
             history: Vec::new(),
             forward: Vec::new(),
             notes_area: Rect::default(),
+            preview_width: 80,
             links_rect: Rect::default(),
             back_rect: Rect::default(),
             vault: vault.to_path_buf(),
@@ -320,6 +322,16 @@ impl App {
 
     fn move_view_cursor(&mut self, delta: i32) {
         self.cursor_row = (self.cursor_row as i32 + delta).max(0) as usize;
+    }
+
+    fn scroll_to_line(&mut self, idx: usize, ln: usize) {
+        let prefix: String = self.notes[idx]
+            .content
+            .lines()
+            .take(ln)
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.preview_scroll = render_markdown(&prefix, self.preview_width).len() as u16;
     }
 
     fn scroll_preview(&mut self, delta: i32) {
@@ -615,13 +627,7 @@ impl App {
                     .map(|(idx, ln, _)| (*idx, *ln));
                 if let Some((idx, ln)) = picked {
                     self.jump_to(idx);
-                    let prefix: String = self.notes[idx]
-                        .content
-                        .lines()
-                        .take(ln)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
+                    self.scroll_to_line(idx, ln);
                 }
                 self.search_open = false;
             }
@@ -1131,13 +1137,7 @@ impl App {
                     .and_then(|i| self.outline_items.get(i))
                     .map(|(_, ln, _)| *ln);
                 if let (Some(ln), Some(idx)) = (target, self.list_state.selected()) {
-                    let prefix: String = self.notes[idx]
-                        .content
-                        .lines()
-                        .take(ln)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
+                    self.scroll_to_line(idx, ln);
                 }
                 self.outline_open = false;
             }
@@ -1391,13 +1391,7 @@ impl App {
             if let Some((_, h)) = target.split_once('#') {
                 let wanted = h.trim().to_lowercase();
                 if let Some(ln) = heading_line(&self.notes[idx].content, &wanted) {
-                    let prefix: String = self.notes[idx]
-                        .content
-                        .lines()
-                        .take(ln)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.preview_scroll = render_markdown(&prefix, 0).len() as u16;
+                    self.scroll_to_line(idx, ln);
                 }
             }
             return;
@@ -2172,6 +2166,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
     .areas(body);
     let [preview_area, links_area] =
         Layout::vertical([Constraint::Min(5), Constraint::Length(links_h)]).areas(right);
+    app.preview_width = preview_area.width.saturating_sub(2) as usize;
     let [out_area, back_area] = 
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .areas(links_area);
