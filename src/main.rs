@@ -32,6 +32,12 @@ enum Focus {
     Preview,
 }
 
+#[derive(Clone)]
+enum TreeRow {
+    Folder(String),
+    Note(usize),
+}
+
 struct TaskItem {
     note: usize,
     line: usize,
@@ -51,6 +57,8 @@ struct Note {
 struct App {
     notes: Vec<Note>,
     list_state: ListState,
+    rows: Vec<TreeRow>,
+    collapsed: std::collections::HashSet<String>,
     link_state: ListState,
     focus: Focus,
     should_quit: bool,
@@ -171,6 +179,8 @@ impl App {
         let mut app = App {
             notes,
             list_state,
+            rows: Vec::new(),
+            collapsed: std::collections::HashSet::new(),
             link_state: ListState::default(),
             focus: Focus::Notes,
             should_quit: false,
@@ -243,12 +253,58 @@ impl App {
             help_scroll: 0,
             keymap: load_keymap(),
         };
+        app.rebuild_rows();
         app.reset_link_selection();
         app
     }
     
+    fn rebuild_rows(&mut self) {
+        let mut rows: Vec<TreeRow> = Vec::new();
+        let mut last = String::new();
+        for (i, n) in self.notes.iter().enumerate() {
+            let folder = n.rel.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+            if folder != last {
+                if !folder.is_empty() {
+                    rows.push(TreeRow::Folder(folder.clone()));
+                }
+                last = folder.clone();
+            }
+            if folder.is_empty() || !self.collapsed.contains(&folder) {
+                rows.push(TreeRow::Note(i));
+            }
+        }
+        self.rows = rows;
+        let valid = self.list_state.selected().and_then(|r| self.rows.get(r))
+            .and_then(|row| match row { TreeRow::Note(i) => Some(*i), _ => None });
+        if valid.is_none() {
+            self.list_state.select(self.rows.iter().position(|r| matches!(r, TreeRow::Note(_))));
+        }
+    }
+
+    fn selected_note_idx(&self) -> Option<usize> {
+        self.list_state.selected()
+            .and_then(|r| self.rows.get(r))
+            .and_then(|row| match row { TreeRow::Note(i) => Some(*i), _ => None })
+    }
+
+    fn select_note(&mut self, i: usize) {
+        if let Some(r) = self.rows.iter().position(|row| matches!(row, TreeRow::Note(n) if *n == i)) {
+            self.list_state.select(Some(r));
+        }
+    }
+
+    fn toggle_folder(&mut self) {
+        let Some(r) = self.list_state.selected() else { return };
+        let Some(TreeRow::Folder(path)) = self.rows.get(r).cloned() else {return };
+        if !self.collapsed.remove(&path) {
+            self.collapsed.insert(path);
+        }
+        self.rebuild_rows();
+        self.reset_link_selection();
+    }
+
     fn selected_note(&self) -> Option<&Note> {
-        self.list_state.selected().and_then(|i| self.notes.get(i))
+        self.selected_note_idx().and_then(|i| self.notes.get(i))
     }
 
     fn note_exists(&self, lowercase_name: &str) -> bool {
@@ -284,7 +340,10 @@ impl App {
         let idx = keep
             .and_then(|p| self.notes.iter().position(|n| n.path == p))
             .or(if self.notes.is_empty() { None } else { Some(0) });
-        self.list_state.select(idx);
+        self.rebuild_rows();
+        if let Some(i) = idx {
+            self.select_note(i);
+        }
         self.history.clear();
         self.forward.clear();
         self.reset_link_selection();
@@ -342,7 +401,7 @@ impl App {
         }
         self.refresh_after_edit();
         if let Some(idx) = self.notes.iter().position(|n| n.path == path) {
-            self.list_state.select(Some(idx));
+            self.select_note(idx);
             self.reset_link_selection();
         }
         if is_new {
@@ -399,7 +458,7 @@ impl App {
     fn save_editor(&mut self) {
         let Some(ta) = &self.editor else { return };
         let text = format!("{}\n", ta.lines().join("\n"));
-        let Some(idx) = self.list_state.selected() else { return };
+        let Some(idx) = self.selected_note_idx()else { return };
         let path = self.notes[idx].path.clone();
         if fs::write(&path, &text).is_ok() {
             self.notes[idx].links = parse_links(&text);
@@ -621,11 +680,11 @@ impl App {
                             .and_then(|(_, v)| v.get(sel))
                             .copied();
                         if let Some(idx) = idx {
-                            if let Some(cur) = self.list_state.selected() {
+                            if let Some(cur) = self.selected_note_idx(){
                                 self.history.push(cur);
                             }
                             self.forward.clear();
-                            self.list_state.select(Some(idx));
+                            self.select_note(idx);
                             self.reset_link_selection();
                         }
                         self.tag_open = false;
@@ -662,7 +721,7 @@ impl App {
     }
 
     fn open_graph(&mut self) {
-        let Some(sel) = self.list_state.selected() else { return };
+        let Some(sel) = self.selected_note_idx()else { return };
         self.graph_adj = self.build_adjency();
         self.graph_center = sel;
         self.graph_depth = 2;
@@ -718,12 +777,12 @@ impl App {
             KeyCode::Enter => {
                 let target = self.graph_visible().get(self.graph_sel).map(|&(i, _)| i);
                 if let Some(idx) = target {
-                    if self.list_state.selected() != Some(idx) {
-                        if let Some(cur) = self.list_state.selected() {
+                    if self.selected_note_idx()!= Some(idx) {
+                        if let Some(cur) = self.selected_note_idx(){
                             self.history.push(cur);
                         }
                         self.forward.clear();
-                        self.list_state.select(Some(idx));
+                        self.select_note(idx);
                         self.reset_link_selection();
                     }
                     self.graph_center = idx;
@@ -735,12 +794,12 @@ impl App {
     }
 
     fn jump_to(&mut self, idx: usize) {
-        if self.list_state.selected() != Some(idx) {
-            if let Some(cur) = self.list_state.selected() {
+        if self.selected_note_idx()!= Some(idx) {
+            if let Some(cur) = self.selected_note_idx(){
                 self.history.push(cur);
             }
             self.forward.clear();
-            self.list_state.select(Some(idx));
+            self.select_note(idx);
             self.reset_link_selection();
         }
     }
@@ -839,7 +898,7 @@ impl App {
     }
 
     fn delete_selected(&mut self) {
-        let Some(idx) = self.list_state.selected() else { return };
+        let Some(idx) = self.selected_note_idx()else { return };
         let path = self.notes[idx].path.clone();
         let name = self.notes[idx].name.clone();
         let trash = self.vault.join(".trash");
@@ -863,7 +922,7 @@ impl App {
     }
 
     fn rename_selected(&mut self, new_name: &str) {
-        let Some(idx) = self.list_state.selected() else { return };
+        let Some(idx) = self.selected_note_idx()else { return };
         let clean: String = new_name
             .trim()
             .chars()
@@ -925,7 +984,7 @@ impl App {
             .iter()
             .position(|n| n.name.to_lowercase() == lower)
         {
-        self.list_state.select(Some(i));
+        self.select_note(i);
         self.reset_link_selection();
         }
         self.status = format!("Renamed '{old_name}' to '{clean}' ({updated} notes updated)");
@@ -1281,11 +1340,11 @@ impl App {
                     .selected()
                     .and_then(|i| self.matches.get(i).copied());
                 if let Some(idx) = picked {
-                    if let Some(cur) = self.list_state.selected() {
+                    if let Some(cur) = self.selected_note_idx(){
                         self.history.push(cur);
                     }
                     self.forward.clear();
-                    self.list_state.select(Some(idx));
+                    self.select_note(idx);
                     self.reset_link_selection();
                 }
                 self.switcher_open = false;
@@ -1308,9 +1367,17 @@ impl App {
         if self.notes.is_empty() {
             return;
         }
-        let cur = self.list_state.selected().unwrap_or(0) as i32;
-        let next = (cur + delta).clamp(0, self.notes.len() as i32 - 1) as usize;
-        self.list_state.select(Some(next));
+        let mut next = self.list_state.selected().unwrap_or(0) as i32;
+        loop {
+            next += delta;
+            if next < 0 || next >= self.rows.len() as i32 {
+                return;
+            }
+            if matches!(self.rows[next as usize], TreeRow::Note(_)) {
+                break;
+            }
+        }
+        self.list_state.select(Some(next as usize));
         self.reset_link_selection();
     }
 
@@ -1335,7 +1402,7 @@ impl App {
             }
             return;
         }
-        if let Some(cur) = self.list_state.selected() {
+        if let Some(cur) = self.selected_note_idx(){
             self.history.push(cur);
         }
         self.forward.clear();
@@ -1350,20 +1417,20 @@ impl App {
 
     fn go_back(&mut self) {
         if let Some(prev) = self.history.pop() {
-            if let Some(cur) = self.list_state.selected() {
+            if let Some(cur) = self.selected_note_idx(){
                 self.forward.push(cur);
             }
-            self.list_state.select(Some(prev));
+            self.select_note(prev);
             self.reset_link_selection();
         }
     }
 
     fn go_forward(&mut self) {
         if let Some(next) = self.forward.pop() {
-            if let Some(cur) = self.list_state.selected() {
+            if let Some(cur) = self.selected_note_idx(){
                 self.history.push(cur);
             }
-            self.list_state.select(Some(next));
+            self.select_note(next);
             self.reset_link_selection();
         }
     }
@@ -1391,11 +1458,11 @@ impl App {
             let target = self.backlinks().get(row).map(|n| n.path.clone());
             if let Some(path) = target {
                 if let Some(idx) = self.notes.iter().position(|n| n.path == path) {
-                    if let Some(cur) = self.list_state.selected() {
+                    if let Some(cur) = self.selected_note_idx(){
                         self.history.push(cur);
                     }
                     self.forward.clear();
-                    self.list_state.select(Some(idx));
+                    self.select_note(idx);
                     self.reset_link_selection();
                 }
             }
@@ -1403,7 +1470,7 @@ impl App {
     }
 
     fn backlinks(&self) -> Vec<&Note> {
-        let Some(sel) = self.list_state.selected() else {
+        let Some(sel) = self.selected_note_idx()else {
             return Vec::new();
         };
         self.notes
@@ -1512,6 +1579,8 @@ impl App {
             KeyCode::Enter => {
                 if self.focus == Focus::Links {
                     self.follow_link();
+                } else if self.focus == Focus::Notes {
+                    self.toggle_folder();
                 }
             }
             KeyCode::PageDown => self.scroll_preview(10),
@@ -2153,9 +2222,15 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
     // Left pane: note list
     let items: Vec<ListItem> = app
-        .notes
+        .rows
         .iter()
-        .map(|n| ListItem::new(n.rel.as_str()))
+        .map(|row| match row {
+            TreeRow::Folder(path) => ListItem::new(Span::styled(
+                format!("{path}/"),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            TreeRow::Note(i) => ListItem::new(app.notes[*i].rel.as_str()),
+        })
         .collect();
     let list = List::new(items)
         .block(
